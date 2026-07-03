@@ -1,0 +1,17 @@
+.bohor-worktrees/
+.DS_Store
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Node
+node_modules/
+frontend/dist/
+
+# Local data
+*.db
+*.db-wal
+*.db-shm
