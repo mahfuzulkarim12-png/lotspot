@@ -69,6 +69,7 @@ select {
   position: sticky;
   top: 0;
   z-index: 10;
+  flex-wrap: wrap;
 }
 
 .brand {

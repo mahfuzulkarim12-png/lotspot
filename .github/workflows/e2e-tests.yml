@@ -1,0 +1,70 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  e2e:
+    name: Playwright E2E Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install backend dependencies
+        run: |
+          python -m venv venv
+          source venv/bin/activate
+          pip install -r backend/requirements.txt
+
+      - name: Install frontend dependencies and build
+        run: |
+          cd frontend
+          npm install
+          npm run build
+
+      - name: Install e2e test dependencies
+        run: |
+          cd e2e-tests
+          npm install
+
+      - name: Start backend server
+        run: |
+          source venv/bin/activate
+          cd backend
+          LOTSPOT_POS_API_KEY=demo-pos-key timeout 120 uvicorn app:app --host 127.0.0.1 --port 5432 > /tmp/backend.log 2>&1 &
+          sleep 3
+
+      - name: Run E2E tests
+        run: |
+          cd e2e-tests
+          npx playwright test --reporter=list --reporter=html
+        env:
+          BACKEND_URL: http://localhost:5432
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: e2e-tests/playwright-report/
+
+      - name: Show backend logs on failure
+        if: failure()
+        run: |
+          echo "=== Backend Logs ==="
+          tail -50 /tmp/backend.log || echo "No backend logs found"
