@@ -77,4 +77,56 @@ test.describe('Real-time cross-tab updates (SSE)', () => {
       await adminContext.close();
     }
   });
+
+  test('5 concurrent customer tabs all receive the same update, and the stream survives a heartbeat cycle', async ({ browser }) => {
+    const TAB_COUNT = 5;
+    const contexts = await Promise.all(Array.from({ length: TAB_COUNT }, () => browser.newContext()));
+    const pages = await Promise.all(contexts.map((ctx) => ctx.newPage()));
+
+    try {
+      await Promise.all(pages.map((page) => page.goto('/')));
+      await Promise.all(
+        pages.map((page) => expect(page.locator('.live-dot')).toHaveText('Live', { timeout: 5000 }))
+      );
+
+      const sku = `E2E-RT5-${uniqueSuffix()}`;
+      const name = `E2E Concurrent Widget ${uniqueSuffix()}`;
+      const product = await require('./helpers').apiCreateProduct(token, {
+        sku,
+        name,
+        qty: 6,
+        price_cents: 499,
+      });
+      createdId = product.id;
+
+      // Every tab subscribed to the SSE stream must independently observe the
+      // same create event — not just the first or last one connected.
+      await Promise.all(
+        pages.map((page) =>
+          expect(page.locator('.product-card', { hasText: name })).toBeVisible({ timeout: 2000 })
+        )
+      );
+
+      // The default 15s heartbeat is overridden to 2s for this test run (see
+      // LOTSPOT_SSE_HEARTBEAT) so we can prove the connection survives past a
+      // keepalive tick — without the CI job idling 15+s per test.
+      await pages[0].waitForTimeout(3500);
+
+      await require('./helpers').apiRequest(`/api/products/${createdId}`, {
+        method: 'PUT',
+        token,
+        body: { qty: 2 },
+      });
+
+      await Promise.all(
+        pages.map((page) =>
+          expect(page.locator('.product-card', { hasText: name }).getByText('2 left')).toBeVisible({
+            timeout: 2000,
+          })
+        )
+      );
+    } finally {
+      await Promise.all(contexts.map((ctx) => ctx.close()));
+    }
+  });
 });

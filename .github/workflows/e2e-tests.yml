@@ -42,19 +42,22 @@ jobs:
           cd e2e-tests
           npm install
 
+      - name: Install Playwright browsers
+        run: |
+          cd e2e-tests
+          npx playwright install --with-deps chromium firefox webkit
+
       - name: Start backend server
         run: |
           source venv/bin/activate
           cd backend
-          LOTSPOT_POS_API_KEY=demo-pos-key timeout 120 uvicorn app:app --host 127.0.0.1 --port 5432 > /tmp/backend.log 2>&1 &
+          LOTSPOT_POS_API_KEY=demo-pos-key LOTSPOT_SSE_HEARTBEAT=2 timeout 120 uvicorn app:app --host 127.0.0.1 --port 4322 > /tmp/backend.log 2>&1 &
           sleep 3
 
       - name: Run E2E tests
         run: |
           cd e2e-tests
           npx playwright test --reporter=list --reporter=html
-        env:
-          BACKEND_URL: http://localhost:5432
 
       - name: Upload test results
         if: always()

@@ -12,7 +12,7 @@
   /* ink */
   --ink: oklch(24% 0.02 75);
   --ink-secondary: oklch(42% 0.02 75);
-  --ink-muted: oklch(56% 0.02 75);
+  --ink-muted: oklch(46% 0.02 75);
 
   /* brand — deep market green */
   --accent: oklch(43% 0.1 155);
