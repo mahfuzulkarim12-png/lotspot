@@ -9,7 +9,7 @@ alias deactivate 'test $?_OLD_VIRTUAL_PATH != 0 && setenv PATH "$_OLD_VIRTUAL_PA
 # Unset irrelevant variables.
 deactivate nondestructive
 
-setenv VIRTUAL_ENV /Users/moofasa/bohor/projects/lotspot/.bohor-worktrees/session-d8f6ebcf/venv
+setenv VIRTUAL_ENV /Users/moofasa/bohor-workspaces/lotspot/.bohor-worktrees/session-4a2c4755/venv
 
 set _OLD_VIRTUAL_PATH="$PATH"
 setenv PATH "$VIRTUAL_ENV/"bin":$PATH"
