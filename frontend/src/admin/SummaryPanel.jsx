@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api/client';
 import { formatCents } from '../lib/money';
+import { useSaleEvents } from '../hooks/useSaleEvents';
 
 function todayISO() {
   const now = new Date();
@@ -32,12 +33,19 @@ export default function SummaryPanel() {
     load(day);
   }, [day, load]);
 
+  const salesConnected = useSaleEvents(() => {
+    load(day);
+  });
+
   const maxQty = summary?.top_items?.[0]?.qty_sold ?? 0;
 
   return (
     <section aria-labelledby="summary-heading" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
       <div>
         <h1 className="panel-title" id="summary-heading">Daily summary</h1>
+        <p className="panel-sub">
+          Sales feed {salesConnected ? 'live' : 'reconnecting'}.
+        </p>
         <div className="summary-controls" style={{ marginTop: 'var(--space-3)' }}>
           <label className="field">
             <span>Business day</span>

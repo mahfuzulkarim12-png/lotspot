@@ -49,6 +49,15 @@ async function apiSalesSummary(token, date) {
   return envelope.data;
 }
 
+async function apiSalesHistory(token, start, end) {
+  const { envelope } = await apiRequest(
+    `/api/sales/history?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`,
+    { token }
+  );
+  if (!envelope.success) throw new Error(`history failed: ${envelope.error}`);
+  return envelope.data;
+}
+
 // Mirrors frontend/src/lib/money.js formatCents exactly (incl. thousands grouping)
 // so summary assertions stay correct as cumulative test-day totals grow.
 function formatCents(cents) {
@@ -106,6 +115,7 @@ module.exports = {
   apiDeleteProduct,
   apiPosSale,
   apiSalesSummary,
+  apiSalesHistory,
   todayISO,
   formatCents,
   selectProductByName,

@@ -65,6 +65,8 @@ export const api = {
     request(`/api/products/${id}`, { method: 'DELETE', auth: true }),
 
   createSale: (sale) => request('/api/sales', { method: 'POST', body: sale, auth: true }),
+  posCheckout: (checkout) =>
+    request('/api/pos/checkout', { method: 'POST', body: checkout, auth: true }),
   listSales: (date) =>
     request(`/api/sales?date=${encodeURIComponent(date)}`, { auth: true }),
   salesSummary: (date) =>

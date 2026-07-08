@@ -6,6 +6,9 @@ const {
   apiCreateProduct,
   apiDeleteProduct,
   apiPosSale,
+  apiSalesHistory,
+  todayISO,
+  formatCents,
 } = require('./helpers');
 
 test.describe('POS intake', () => {
@@ -65,5 +68,66 @@ test.describe('POS intake', () => {
     const { status, envelope } = await apiPosSale({ sku: 'DOES-NOT-EXIST-SKU', qty: 1 });
     expect(status).toBeGreaterThanOrEqual(400);
     expect(envelope.success).toBe(false);
+  });
+
+  test('admin POS checkout updates the daily history feed in real time', async ({ browser }) => {
+    const today = todayISO();
+    const baseline = await apiSalesHistory(token, today, today);
+
+    const soda = await apiCreateProduct(token, {
+      sku: `E2E-POSUI-${uniqueSuffix()}-SODA`,
+      name: `E2E POS Soda ${uniqueSuffix()}`,
+      qty: 1000,
+      price_cents: 250,
+    });
+    const chips = await apiCreateProduct(token, {
+      sku: `E2E-POSUI-${uniqueSuffix()}-CHIPS`,
+      name: `E2E POS Chips ${uniqueSuffix()}`,
+      qty: 1000,
+      price_cents: 400,
+    });
+
+    const context = await browser.newContext();
+    const loginPage = await context.newPage();
+    const historyPage = await context.newPage();
+
+    try {
+      await loginPage.goto('/admin/login');
+      await loginPage.getByLabel('Username').fill('admin');
+      await loginPage.getByLabel('Password').fill('admin');
+      await loginPage.getByRole('button', { name: /sign in/i }).click();
+      await expect(loginPage).toHaveURL(/\/admin\/inventory$/);
+      await loginPage.goto('/admin/pos');
+      await expect(loginPage).toHaveURL(/\/admin\/pos$/);
+
+      await historyPage.goto('/admin/history');
+      await expect(historyPage.getByText('Daily sales history')).toBeVisible();
+
+      await loginPage.getByLabel('Search products').fill(soda.name);
+      await loginPage.getByRole('button', { name: /Add to cart/i }).click();
+      await loginPage.getByLabel('Search products').fill(chips.name);
+      await loginPage.getByRole('button', { name: /Add to cart/i }).click();
+      await loginPage.getByRole('button', { name: /Complete checkout/i }).click();
+      await expect(loginPage.getByRole('status')).toContainText('Checkout complete');
+
+      const baseDay = baseline.days[0] || { transaction_count: 0, total_items_sold: 0, total_revenue_cents: 0 };
+      const expectedHistory = {
+        transaction_count: baseDay.transaction_count + 1,
+        total_items_sold: baseDay.total_items_sold + 2,
+        total_revenue_cents: baseDay.total_revenue_cents + 650,
+      };
+
+      const historyRow = historyPage.locator('tr', { hasText: today });
+      await expect(historyRow.getByText(String(expectedHistory.transaction_count))).toBeVisible({
+        timeout: 3000,
+      });
+      await expect(historyRow.getByText(String(expectedHistory.total_items_sold))).toBeVisible();
+      await expect(historyRow.getByText(formatCents(expectedHistory.total_revenue_cents))).toBeVisible();
+    } finally {
+      await context.close();
+      await apiDeleteProduct(token, soda.id).catch(() => {});
+      await apiDeleteProduct(token, chips.id).catch(() => {});
+      createdId = null;
+    }
   });
 });

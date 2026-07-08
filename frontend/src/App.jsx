@@ -4,6 +4,7 @@ import CustomerView from './pages/CustomerView';
 import AdminLogin from './pages/AdminLogin';
 import AdminDashboard from './pages/AdminDashboard';
 import InventoryPanel from './admin/InventoryPanel';
+import PosPanel from './admin/PosPanel';
 import SalesEntryPanel from './admin/SalesEntryPanel';
 import SummaryPanel from './admin/SummaryPanel';
 import DailyHistoryPanel from './admin/DailyHistoryPanel';
@@ -33,6 +34,7 @@ export default function App() {
         }
       >
         <Route index element={<Navigate to="inventory" replace />} />
+        <Route path="pos" element={<PosPanel />} />
         <Route path="inventory" element={<InventoryPanel />} />
         <Route path="sale" element={<SalesEntryPanel />} />
         <Route path="summary" element={<SummaryPanel />} />

@@ -3,8 +3,8 @@ import { useAuth } from '../context/AuthContext';
 import { useInventory } from '../hooks/useInventory';
 
 const TABS = [
+  { to: 'pos', label: 'POS' },
   { to: 'inventory', label: 'Inventory' },
-  { to: 'sale', label: 'New sale' },
   { to: 'summary', label: 'Daily summary' },
   { to: 'history', label: 'History' },
 ];

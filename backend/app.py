@@ -10,6 +10,7 @@ import hmac
 import json
 import os
 import sqlite3
+import uuid
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -22,7 +23,15 @@ from starlette.staticfiles import StaticFiles
 import db
 from auth import TokenStore, seed_admin, verify_password
 from events import Broadcaster
-from models import LoginIn, PosSaleIn, ProductIn, ProductUpdate, SaleIn
+from models import (
+    CheckoutItemIn,
+    LoginIn,
+    PosCheckoutIn,
+    PosSaleIn,
+    ProductIn,
+    ProductUpdate,
+    SaleIn,
+)
 
 DATE_PATTERN = r"^\d{4}-\d{2}-\d{2}$"
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
@@ -68,7 +77,7 @@ def _sales_daily_totals(
 ) -> list[dict]:
     rows = conn.execute(
         """SELECT substr(sold_at, 1, 10) AS day,
-                  COUNT(*) AS transaction_count,
+                  COUNT(DISTINCT transaction_id) AS transaction_count,
                   COALESCE(SUM(qty), 0) AS total_items_sold,
                   COALESCE(SUM(total_cents), 0) AS total_revenue_cents
            FROM sales
@@ -108,6 +117,42 @@ def _sales_daily_totals(
     return totals
 
 
+def _insert_sale_row(
+    conn: sqlite3.Connection,
+    product: dict,
+    qty: int,
+    unit_price_cents: int | None,
+    source: str,
+    transaction_id: str,
+    payment_method: str | None,
+) -> dict:
+    now = db.local_now_iso()
+    price = unit_price_cents if unit_price_cents is not None else product["price_cents"]
+    cur = conn.execute(
+        """INSERT INTO sales
+           (product_id, transaction_id, product_name, sku, qty, unit_price_cents,
+            total_cents, source, payment_method, sold_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            product["id"],
+            transaction_id,
+            product["name"],
+            product["sku"],
+            qty,
+            price,
+            qty * price,
+            source,
+            payment_method,
+            now,
+            now,
+        ),
+    )
+    sale_id = cur.lastrowid
+    return db.row_to_dict(
+        conn.execute("SELECT * FROM sales WHERE id = ?", (sale_id,)).fetchone()
+    )
+
+
 def _record_sale(
     conn: sqlite3.Connection,
     broadcaster: Broadcaster,
@@ -118,10 +163,10 @@ def _record_sale(
 ) -> dict:
     """Atomically decrement stock and insert the sale row (snapshotting
     name/sku/price so history survives product edits and deletion)."""
-    now = db.local_now_iso()
+    transaction_id = uuid.uuid4().hex
     cur = conn.execute(
         "UPDATE products SET qty = qty - ?, updated_at = ? WHERE id = ? AND qty >= ?",
-        (qty, now, product["id"], qty),
+        (qty, db.local_now_iso(), product["id"], qty),
     )
     if cur.rowcount == 0:
         raise ApiError(
@@ -130,25 +175,107 @@ def _record_sale(
             f"requested {qty}, available {product['qty']}",
         )
 
-    price = unit_price_cents if unit_price_cents is not None else product["price_cents"]
-    cur = conn.execute(
-        """INSERT INTO sales
-           (product_id, product_name, sku, qty, unit_price_cents, total_cents,
-            source, sold_at, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (product["id"], product["name"], product["sku"], qty, price, qty * price,
-         source, now, now),
+    sale = _insert_sale_row(
+        conn,
+        product,
+        qty,
+        unit_price_cents,
+        source=source,
+        transaction_id=transaction_id,
+        payment_method=None,
     )
-    sale_id = cur.lastrowid
     conn.commit()
 
-    sale = db.row_to_dict(
-        conn.execute("SELECT * FROM sales WHERE id = ?", (sale_id,)).fetchone()
-    )
     updated = _fetch_product(conn, product["id"])
     broadcaster.publish({"type": "inventory", "action": "updated", "product": updated})
     broadcaster.publish({"type": "sale", "action": "created", "sale": sale})
     return sale
+
+
+def _record_checkout(
+    conn: sqlite3.Connection,
+    broadcaster: Broadcaster,
+    items: list[CheckoutItemIn],
+    payment_method: str,
+) -> dict:
+    transaction_id = uuid.uuid4().hex
+    now = db.local_now_iso()
+    product_ids = [item.product_id for item in items]
+    rows = conn.execute(
+        f"SELECT * FROM products WHERE id IN ({','.join('?' for _ in product_ids)})",
+        product_ids,
+    ).fetchall()
+    products = {row["id"]: db.row_to_dict(row) for row in rows}
+
+    missing = [item.product_id for item in items if item.product_id not in products]
+    if missing:
+        raise ApiError(404, f"Product {missing[0]} not found")
+
+    merged: list[dict] = []
+    by_product_id: dict[int, dict] = {}
+    for item in items:
+        # Group duplicate cart lines for a single stock check and sale row.
+        entry = by_product_id.get(item.product_id)
+        if entry is None:
+            entry = {
+                "product": products[item.product_id],
+                "qty": 0,
+                "max_qty": products[item.product_id]["qty"],
+            }
+            by_product_id[item.product_id] = entry
+            merged.append(entry)
+        entry["qty"] += item.qty
+
+    for entry in merged:
+        product = entry["product"]
+        qty = entry["qty"]
+        cur = conn.execute(
+            "UPDATE products SET qty = qty - ?, updated_at = ? WHERE id = ? AND qty >= ?",
+            (qty, now, product["id"], qty),
+        )
+        if cur.rowcount == 0:
+            raise ApiError(
+                409,
+                f"Insufficient stock for {product['sku']}: "
+                f"requested {qty}, available {product['qty']}",
+            )
+
+    sales = []
+    for entry in merged:
+        product = entry["product"]
+        qty = entry["qty"]
+        sale = _insert_sale_row(
+            conn,
+            product,
+            qty,
+            None,
+            source="pos",
+            transaction_id=transaction_id,
+            payment_method=payment_method,
+        )
+        sales.append(sale)
+
+    conn.commit()
+
+    refreshed_products = []
+    for entry in merged:
+        updated = _fetch_product(conn, entry["product"]["id"])
+        refreshed_products.append(updated)
+        broadcaster.publish({"type": "inventory", "action": "updated", "product": updated})
+    for sale in sales:
+        broadcaster.publish({"type": "sale", "action": "created", "sale": sale})
+
+    total_qty = sum(item["qty"] for item in sales)
+    total_cents = sum(item["total_cents"] for item in sales)
+    return {
+        "transaction_id": transaction_id,
+        "payment_method": payment_method,
+        "line_items": sales,
+        "total_qty": total_qty,
+        "total_cents": total_cents,
+        "item_count": len(sales),
+        "products": refreshed_products,
+    }
 
 
 def create_app() -> FastAPI:
@@ -333,6 +460,17 @@ def create_app() -> FastAPI:
         finally:
             conn.close()
         return ok(sale, status_code=201)
+
+    @app.post("/api/pos/checkout", status_code=201, tags=["pos"])
+    async def pos_checkout(body: PosCheckoutIn, admin: str = Depends(require_admin)):
+        conn = db.connect()
+        try:
+            checkout = _record_checkout(
+                conn, app.state.broadcaster, body.items, body.payment_method
+            )
+        finally:
+            conn.close()
+        return ok({**checkout, "cashier": admin}, status_code=201)
 
     @app.get("/api/sales", tags=["sales"])
     async def list_sales(
