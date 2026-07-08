@@ -47,12 +47,30 @@ jobs:
           cd e2e-tests
           npx playwright install --with-deps chromium firefox webkit
 
+      - name: Allocate backend port
+        run: |
+          python - <<'PY' >> "$GITHUB_ENV"
+          import socket
+          with socket.socket() as sock:
+              sock.bind(("127.0.0.1", 0))
+              port = sock.getsockname()[1]
+          print(f"LOTSPOT_BACKEND_PORT={port}")
+          print(f"LOTSPOT_BASE_URL=http://127.0.0.1:{port}")
+          PY
+
       - name: Start backend server
         run: |
           source venv/bin/activate
           cd backend
-          LOTSPOT_POS_API_KEY=demo-pos-key LOTSPOT_SSE_HEARTBEAT=2 timeout 120 uvicorn app:app --host 127.0.0.1 --port 4322 > /tmp/backend.log 2>&1 &
-          sleep 3
+          LOTSPOT_POS_API_KEY=demo-pos-key LOTSPOT_SSE_HEARTBEAT=2 uvicorn app:app --host 127.0.0.1 --port "$LOTSPOT_BACKEND_PORT" > /tmp/backend.log 2>&1 &
+          for attempt in $(seq 1 30); do
+            if curl -fs "http://127.0.0.1:${LOTSPOT_BACKEND_PORT}/api/health" >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Backend did not become healthy on port ${LOTSPOT_BACKEND_PORT}" >&2
+          exit 1
 
       - name: Run E2E tests
         run: |

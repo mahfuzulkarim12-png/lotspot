@@ -1,4 +1,4 @@
-const BASE_URL = 'http://localhost:4322';
+const BASE_URL = process.env.LOTSPOT_BASE_URL || 'http://127.0.0.1:4322';
 const ADMIN_USER = process.env.LOTSPOT_ADMIN_USER || 'admin';
 const ADMIN_PASSWORD = process.env.LOTSPOT_ADMIN_PASSWORD || 'admin';
 const POS_API_KEY = process.env.LOTSPOT_POS_API_KEY || 'demo-pos-key';

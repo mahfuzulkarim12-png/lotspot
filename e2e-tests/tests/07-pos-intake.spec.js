@@ -1,5 +1,6 @@
 const { test, expect } = require('./fixtures');
 const {
+  BASE_URL,
   uniqueSuffix,
   apiLogin,
   apiCreateProduct,
@@ -52,7 +53,7 @@ test.describe('POS intake', () => {
     });
     createdId = product.id;
 
-    const res = await fetch('http://localhost:4322/api/pos/sales', {
+    const res = await fetch(`${BASE_URL}/api/pos/sales`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-API-Key': 'wrong-key' },
       body: JSON.stringify({ sku, qty: 1 }),

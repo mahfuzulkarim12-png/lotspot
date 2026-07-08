@@ -1,5 +1,7 @@
 const { defineConfig, devices } = require('@playwright/test');
 
+const BASE_URL = process.env.LOTSPOT_BASE_URL || 'http://127.0.0.1:4322';
+
 module.exports = defineConfig({
   testDir: './tests',
   fullyParallel: false,
@@ -7,7 +9,7 @@ module.exports = defineConfig({
   retries: 0,
   reporter: [['list'], ['html', { open: 'never', outputFolder: 'report' }]],
   use: {
-    baseURL: 'http://localhost:4322',
+    baseURL: BASE_URL,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
