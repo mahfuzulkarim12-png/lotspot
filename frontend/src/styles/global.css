@@ -536,6 +536,7 @@ select {
   display: flex;
   align-items: flex-end;
   gap: var(--space-3);
+  flex-wrap: wrap;
 }
 
 .stat-row {

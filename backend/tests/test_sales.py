@@ -136,5 +136,65 @@ def test_daily_summary_empty_day(client, admin_headers):
     assert summary["top_items"] == []
 
 
+def test_daily_history_rollup_matches_raw_sales(client, admin_headers, monkeypatch):
+    product = _add_product(client, admin_headers, "HIST-01", "History Item", 20, 250)
+
+    raw_sales = [
+        ("2026-07-01T09:00:00", 2),
+        ("2026-07-01T13:15:00", 1),
+        ("2026-07-03T11:30:00", 4),
+    ]
+
+    for sold_at, qty in raw_sales:
+        monkeypatch.setattr("db.local_now_iso", lambda sold_at=sold_at: sold_at)
+        resp = client.post(
+            "/api/sales",
+            json={"product_id": product["id"], "qty": qty},
+            headers=admin_headers,
+        )
+        assert resp.status_code == 201, resp.text
+
+    resp = client.get(
+        "/api/sales/history",
+        params={"start": "2026-07-01", "end": "2026-07-04"},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 200
+    history = resp.json()["data"]["days"]
+
+    assert [row["date"] for row in history] == [
+        "2026-07-01",
+        "2026-07-02",
+        "2026-07-03",
+        "2026-07-04",
+    ]
+    assert history == [
+        {
+            "date": "2026-07-01",
+            "transaction_count": 2,
+            "total_items_sold": 3,
+            "total_revenue_cents": 750,
+        },
+        {
+            "date": "2026-07-02",
+            "transaction_count": 0,
+            "total_items_sold": 0,
+            "total_revenue_cents": 0,
+        },
+        {
+            "date": "2026-07-03",
+            "transaction_count": 1,
+            "total_items_sold": 4,
+            "total_revenue_cents": 1000,
+        },
+        {
+            "date": "2026-07-04",
+            "transaction_count": 0,
+            "total_items_sold": 0,
+            "total_revenue_cents": 0,
+        },
+    ]
+
+
 def test_summary_requires_auth(client):
     assert client.get("/api/sales/summary").status_code == 401

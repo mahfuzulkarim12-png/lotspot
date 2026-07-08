@@ -69,4 +69,9 @@ export const api = {
     request(`/api/sales?date=${encodeURIComponent(date)}`, { auth: true }),
   salesSummary: (date) =>
     request(`/api/sales/summary?date=${encodeURIComponent(date)}`, { auth: true }),
+  salesHistory: (start, end) =>
+    request(
+      `/api/sales/history?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`,
+      { auth: true }
+    ),
 };

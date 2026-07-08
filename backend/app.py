@@ -10,7 +10,7 @@ import hmac
 import json
 import os
 import sqlite3
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Query, Request
@@ -61,6 +61,51 @@ def require_admin(request: Request) -> str:
 def _fetch_product(conn: sqlite3.Connection, product_id: int) -> dict | None:
     row = conn.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
     return db.row_to_dict(row) if row else None
+
+
+def _sales_daily_totals(
+    conn: sqlite3.Connection, start_day: str, end_day: str
+) -> list[dict]:
+    rows = conn.execute(
+        """SELECT substr(sold_at, 1, 10) AS day,
+                  COUNT(*) AS transaction_count,
+                  COALESCE(SUM(qty), 0) AS total_items_sold,
+                  COALESCE(SUM(total_cents), 0) AS total_revenue_cents
+           FROM sales
+           WHERE substr(sold_at, 1, 10) BETWEEN ? AND ?
+           GROUP BY day
+           ORDER BY day""",
+        (start_day, end_day),
+    ).fetchall()
+    by_day = {
+        row["day"]: {
+            "date": row["day"],
+            "transaction_count": row["transaction_count"],
+            "total_items_sold": row["total_items_sold"],
+            "total_revenue_cents": row["total_revenue_cents"],
+        }
+        for row in rows
+    }
+
+    start = date.fromisoformat(start_day)
+    end = date.fromisoformat(end_day)
+    totals = []
+    current = start
+    while current <= end:
+        day = current.isoformat()
+        totals.append(
+            by_day.get(
+                day,
+                {
+                    "date": day,
+                    "transaction_count": 0,
+                    "total_items_sold": 0,
+                    "total_revenue_cents": 0,
+                },
+            )
+        )
+        current += timedelta(days=1)
+    return totals
 
 
 def _record_sale(
@@ -308,13 +353,7 @@ def create_app() -> FastAPI:
         day = day or date.today().isoformat()
         conn = db.connect()
         try:
-            totals = conn.execute(
-                """SELECT COUNT(*) AS transaction_count,
-                          COALESCE(SUM(qty), 0) AS total_items_sold,
-                          COALESCE(SUM(total_cents), 0) AS total_revenue_cents
-                   FROM sales WHERE substr(sold_at, 1, 10) = ?""",
-                (day,),
-            ).fetchone()
+            totals = _sales_daily_totals(conn, day, day)[0]
             top = conn.execute(
                 """SELECT sku, product_name AS name,
                           SUM(qty) AS qty_sold, SUM(total_cents) AS revenue_cents
@@ -329,8 +368,40 @@ def create_app() -> FastAPI:
         return ok(
             {
                 "date": day,
-                **db.row_to_dict(totals),
+                **totals,
                 "top_items": [db.row_to_dict(r) for r in top],
+            }
+        )
+
+    @app.get("/api/sales/history", tags=["sales"])
+    async def sales_history(
+        _admin: str = Depends(require_admin),
+        start: str = Query(..., pattern=DATE_PATTERN),
+        end: str = Query(..., pattern=DATE_PATTERN),
+    ):
+        start_day = date.fromisoformat(start)
+        end_day = date.fromisoformat(end)
+        if end_day < start_day:
+            raise ApiError(422, "end must be on or after start")
+
+        conn = db.connect()
+        try:
+            totals = _sales_daily_totals(conn, start, end)
+        finally:
+            conn.close()
+        return ok(
+            {
+                "start": start,
+                "end": end,
+                "days": [
+                    {
+                        "date": row["date"],
+                        "transaction_count": row["transaction_count"],
+                        "total_items_sold": row["total_items_sold"],
+                        "total_revenue_cents": row["total_revenue_cents"],
+                    }
+                    for row in totals
+                ],
             }
         )
 

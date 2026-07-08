@@ -6,6 +6,7 @@ import AdminDashboard from './pages/AdminDashboard';
 import InventoryPanel from './admin/InventoryPanel';
 import SalesEntryPanel from './admin/SalesEntryPanel';
 import SummaryPanel from './admin/SummaryPanel';
+import DailyHistoryPanel from './admin/DailyHistoryPanel';
 
 function RequireAuth({ children }) {
   const { status } = useAuth();
@@ -35,6 +36,7 @@ export default function App() {
         <Route path="inventory" element={<InventoryPanel />} />
         <Route path="sale" element={<SalesEntryPanel />} />
         <Route path="summary" element={<SummaryPanel />} />
+        <Route path="history" element={<DailyHistoryPanel />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
