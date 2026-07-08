@@ -44,6 +44,10 @@ Open `http://localhost:8000/` (customer screen) and
 `http://localhost:8000/admin` (back office). Interactive API docs (Swagger UI)
 are at `/docs`, the OpenAPI spec at `/openapi.json`.
 
+**Important**: The app must run with a single worker process. Do not use
+`uvicorn --workers N` (N > 1). Auth tokens and real-time events (SSE) are
+stored in-process; multiple workers would silently break both.
+
 ### First login
 
 On first start an admin account is seeded from environment variables:

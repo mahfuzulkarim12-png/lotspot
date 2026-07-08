@@ -187,6 +187,12 @@ def create_app() -> FastAPI:
     async def handle_http_error(_request: Request, exc: StarletteHTTPException):
         return fail(str(exc.detail), exc.status_code)
 
+    @app.exception_handler(Exception)
+    async def handle_exception(_request: Request, exc: Exception):
+        import logging
+        logging.exception("Unhandled exception")
+        return fail("Internal server error", 500)
+
     # ------------------------------------------------------------- health
 
     @app.get("/api/health", tags=["system"])
@@ -472,10 +478,11 @@ def create_app() -> FastAPI:
         async def spa(full_path: str):
             if full_path.startswith("api/") or full_path == "api":
                 return fail("Not Found", 404)
-            candidate = FRONTEND_DIST / full_path
-            if full_path and candidate.is_file():
+            candidate = (FRONTEND_DIST / full_path).resolve()
+            frontend_dist_resolved = FRONTEND_DIST.resolve()
+            if full_path and candidate.is_relative_to(frontend_dist_resolved) and candidate.is_file():
                 return FileResponse(candidate)
-            return FileResponse(FRONTEND_DIST / "index.html")
+            return FileResponse(frontend_dist_resolved / "index.html")
 
     return app
 
