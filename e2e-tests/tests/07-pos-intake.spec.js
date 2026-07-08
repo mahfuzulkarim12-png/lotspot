@@ -8,6 +8,7 @@ const {
   apiPosSale,
   apiSalesHistory,
   todayISO,
+  formatCents,
 } = require('./helpers');
 
 test.describe('POS intake', () => {
@@ -109,10 +110,11 @@ test.describe('POS intake', () => {
       await loginPage.getByRole('button', { name: /Complete checkout/i }).click();
       await expect(loginPage.getByRole('status')).toContainText('Checkout complete');
 
+      const baseDay = baseline.days[0] || { transaction_count: 0, total_items_sold: 0, total_revenue_cents: 0 };
       const expectedHistory = {
-        transaction_count: baseline.days[0].transaction_count + 1,
-        total_items_sold: baseline.days[0].total_items_sold + 2,
-        total_revenue_cents: baseline.days[0].total_revenue_cents + 650,
+        transaction_count: baseDay.transaction_count + 1,
+        total_items_sold: baseDay.total_items_sold + 2,
+        total_revenue_cents: baseDay.total_revenue_cents + 650,
       };
 
       const historyRow = historyPage.locator('tr', { hasText: today });
@@ -120,7 +122,7 @@ test.describe('POS intake', () => {
         timeout: 3000,
       });
       await expect(historyRow.getByText(String(expectedHistory.total_items_sold))).toBeVisible();
-      await expect(historyRow.getByText('$6.50')).toBeVisible();
+      await expect(historyRow.getByText(formatCents(expectedHistory.total_revenue_cents))).toBeVisible();
     } finally {
       await context.close();
       await apiDeleteProduct(token, soda.id).catch(() => {});
