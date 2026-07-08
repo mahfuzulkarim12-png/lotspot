@@ -37,13 +37,13 @@ describe('PosPanel', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Coca-Cola 330ml/i }));
 
-    expect(screen.getByText('Coca-Cola 330ml')).toBeInTheDocument();
+    expect(screen.getAllByText('Coca-Cola 330ml')).toHaveLength(3);
     expect(screen.getByDisplayValue('1')).toBeInTheDocument();
-    expect(screen.getByText('$2.50')).toBeInTheDocument();
+    expect(screen.getAllByText('$2.50')).toHaveLength(4);
 
     fireEvent.change(screen.getByLabelText('Qty'), { target: { value: '2' } });
     expect(screen.getByDisplayValue('2')).toBeInTheDocument();
-    expect(screen.getByText('$5.00')).toBeInTheDocument();
+    expect(screen.getAllByText('$5.00')).toHaveLength(2);
 
     fireEvent.click(screen.getByRole('button', { name: /Complete checkout/i }));
 
