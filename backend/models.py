@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 SKU_MAX = 64
 NAME_MAX = 200
 SOURCE_MAX = 32
+PAYMENT_METHOD_MAX = 32
 
 
 class LoginIn(BaseModel):
@@ -38,3 +39,13 @@ class PosSaleIn(BaseModel):
     sku: str = Field(min_length=1, max_length=SKU_MAX)
     qty: int = Field(gt=0, le=999999)
     unit_price_cents: int | None = Field(default=None, ge=0, le=9999999)
+
+
+class CheckoutItemIn(BaseModel):
+    product_id: int = Field(gt=0)
+    qty: int = Field(gt=0, le=999999)
+
+
+class PosCheckoutIn(BaseModel):
+    items: list[CheckoutItemIn] = Field(min_length=1)
+    payment_method: str = Field(min_length=1, max_length=PAYMENT_METHOD_MAX)

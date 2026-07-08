@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api/client';
 import { formatCents } from '../lib/money';
+import { useSaleEvents } from '../hooks/useSaleEvents';
 
 function todayISO() {
   const now = new Date();
@@ -43,6 +44,10 @@ export default function DailyHistoryPanel() {
     loadRange(range);
   }, [range, loadRange]);
 
+  const salesConnected = useSaleEvents(() => {
+    loadRange(range);
+  });
+
   const setPresetRange = (value) => {
     setPreset(value);
     if (value === 'custom') return;
@@ -63,6 +68,9 @@ export default function DailyHistoryPanel() {
         <h1 className="panel-title" id="history-heading">Daily sales history</h1>
         <p className="panel-sub">
           Review sales totals across a range of business days.
+        </p>
+        <p className="panel-sub" style={{ marginTop: 'var(--space-1)' }}>
+          Sales feed {salesConnected ? 'live' : 'reconnecting'}.
         </p>
         <div className="summary-controls" style={{ marginTop: 'var(--space-3)' }}>
           <label className="field">

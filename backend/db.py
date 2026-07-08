@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS products (
 CREATE TABLE IF NOT EXISTS sales (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+    transaction_id TEXT,
     -- name/sku/price are snapshotted at sale time so history survives
     -- product deletion and later price changes
     product_name TEXT NOT NULL,
@@ -35,6 +36,7 @@ CREATE TABLE IF NOT EXISTS sales (
     unit_price_cents INTEGER NOT NULL CHECK (unit_price_cents >= 0),
     total_cents INTEGER NOT NULL,
     source TEXT NOT NULL DEFAULT 'manual',
+    payment_method TEXT,
     sold_at TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
@@ -68,9 +70,27 @@ def init_db() -> None:
     try:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA)
+        _migrate_sales_table(conn)
         conn.commit()
     finally:
         conn.close()
+
+
+def _migrate_sales_table(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(sales)")}
+    needs_backfill = False
+    if "transaction_id" not in columns:
+        conn.execute("ALTER TABLE sales ADD COLUMN transaction_id TEXT")
+        needs_backfill = True
+    if "payment_method" not in columns:
+        conn.execute("ALTER TABLE sales ADD COLUMN payment_method TEXT")
+        needs_backfill = True
+    if needs_backfill or "transaction_id" in columns:
+        conn.execute(
+            """UPDATE sales
+               SET transaction_id = COALESCE(transaction_id, printf('legacy-%d', id))
+               WHERE transaction_id IS NULL OR transaction_id = ''"""
+        )
 
 
 def local_now_iso() -> str:

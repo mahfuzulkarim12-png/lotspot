@@ -118,6 +118,39 @@ def test_sale_publishes_inventory_and_sale_events(client, admin_headers, sample_
     assert events[1]["sale"]["qty"] == 1
 
 
+def test_pos_checkout_publishes_inventory_and_sale_events(client, admin_headers):
+    coke = client.post(
+        "/api/products",
+        json={"sku": "EVT-COKE", "name": "Event Coke", "qty": 10, "price_cents": 250},
+        headers=admin_headers,
+    ).json()["data"]
+    bread = client.post(
+        "/api/products",
+        json={"sku": "EVT-BREAD", "name": "Event Bread", "qty": 10, "price_cents": 400},
+        headers=admin_headers,
+    ).json()["data"]
+
+    queue = client.app.state.broadcaster.subscribe()
+    resp = client.post(
+        "/api/pos/checkout",
+        json={
+            "payment_method": "card",
+            "items": [
+                {"product_id": coke["id"], "qty": 2},
+                {"product_id": bread["id"], "qty": 1},
+            ],
+        },
+        headers=admin_headers,
+    )
+    assert resp.status_code == 201
+
+    events = _drain(queue)
+    assert [e["type"] for e in events] == ["inventory", "inventory", "sale", "sale"]
+    assert {e["sale"]["transaction_id"] for e in events if e["type"] == "sale"} == {
+        resp.json()["data"]["transaction_id"]
+    }
+
+
 def test_product_delete_publishes_deleted_event(client, admin_headers, sample_product):
     queue = client.app.state.broadcaster.subscribe()
     resp = client.delete(f"/api/products/{sample_product['id']}", headers=admin_headers)
