@@ -49,6 +49,32 @@ CREATE TABLE IF NOT EXISTS admin_users (
     password_hash TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+-- admin_users is the single shared login for the POS terminal itself, not
+-- per-person identity, so staff clocking in/out are modeled as their own
+-- lightweight entity (name + PIN) rather than reusing admin accounts.
+CREATE TABLE IF NOT EXISTS employees (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    pin_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS time_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+    clock_in_at TEXT NOT NULL,
+    clock_out_at TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_time_entries_employee_id ON time_entries (employee_id);
+CREATE INDEX IF NOT EXISTS idx_time_entries_clock_in_at ON time_entries (clock_in_at);
+
+-- Belt-and-braces: the app checks for an open shift before inserting, but
+-- this index makes "one open shift per employee" a hard DB-level guarantee.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_time_entries_one_open_shift
+    ON time_entries (employee_id) WHERE clock_out_at IS NULL;
 """
 
 

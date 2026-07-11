@@ -11,7 +11,7 @@ import json
 import os
 import sqlite3
 import uuid
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Query, Request
@@ -21,10 +21,13 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
 
 import db
-from auth import TokenStore, seed_admin, verify_password
+from auth import TokenStore, hash_password, seed_admin, verify_password
 from events import Broadcaster
 from models import (
     CheckoutItemIn,
+    ClockInIn,
+    ClockOutIn,
+    EmployeeIn,
     LoginIn,
     PosCheckoutIn,
     PosSaleIn,
@@ -70,6 +73,31 @@ def require_admin(request: Request) -> str:
 def _fetch_product(conn: sqlite3.Connection, product_id: int) -> dict | None:
     row = conn.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
     return db.row_to_dict(row) if row else None
+
+
+def _fetch_employee(conn: sqlite3.Connection, employee_id: int) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM employees WHERE id = ?", (employee_id,)
+    ).fetchone()
+    return db.row_to_dict(row) if row else None
+
+
+def _public_employee(employee: dict) -> dict:
+    return {k: v for k, v in employee.items() if k != "pin_hash"}
+
+
+def _open_shift(conn: sqlite3.Connection, employee_id: int) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM time_entries WHERE employee_id = ? AND clock_out_at IS NULL",
+        (employee_id,),
+    ).fetchone()
+    return db.row_to_dict(row) if row else None
+
+
+def _shift_duration_minutes(clock_in_at: str, clock_out_at: str) -> int:
+    start = datetime.fromisoformat(clock_in_at)
+    end = datetime.fromisoformat(clock_out_at)
+    return int((end - start).total_seconds() // 60)
 
 
 def _sales_daily_totals(
@@ -576,6 +604,179 @@ def create_app() -> FastAPI:
         finally:
             conn.close()
         return ok(sale, status_code=201)
+
+    # ----------------------------------------------------------- employees
+
+    @app.post("/api/employees", status_code=201, tags=["timeclock"])
+    async def create_employee(body: EmployeeIn, _admin: str = Depends(require_admin)):
+        now = db.local_now_iso()
+        conn = db.connect()
+        try:
+            cur = conn.execute(
+                "INSERT INTO employees (name, pin_hash, created_at) VALUES (?, ?, ?)",
+                (body.name, hash_password(body.pin), now),
+            )
+            conn.commit()
+            employee = _fetch_employee(conn, cur.lastrowid)
+        finally:
+            conn.close()
+        return ok(_public_employee(employee), status_code=201)
+
+    @app.get("/api/employees", tags=["timeclock"])
+    async def list_employees(_admin: str = Depends(require_admin)):
+        conn = db.connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM employees ORDER BY name COLLATE NOCASE"
+            ).fetchall()
+        finally:
+            conn.close()
+        return ok([_public_employee(db.row_to_dict(r)) for r in rows])
+
+    # ----------------------------------------------------------- timeclock
+
+    @app.post("/api/timeclock/clock-in", status_code=201, tags=["timeclock"])
+    async def timeclock_clock_in(body: ClockInIn, _admin: str = Depends(require_admin)):
+        conn = db.connect()
+        try:
+            employee = _fetch_employee(conn, body.employee_id)
+            if employee is None:
+                raise ApiError(404, f"Employee {body.employee_id} not found")
+            if not verify_password(body.pin, employee["pin_hash"]):
+                raise ApiError(401, "Invalid PIN")
+            if _open_shift(conn, body.employee_id) is not None:
+                raise ApiError(409, f"{employee['name']} already has an open shift")
+
+            now = db.local_now_iso()
+            cur = conn.execute(
+                "INSERT INTO time_entries (employee_id, clock_in_at, created_at) "
+                "VALUES (?, ?, ?)",
+                (body.employee_id, now, now),
+            )
+            conn.commit()
+            entry = db.row_to_dict(
+                conn.execute(
+                    "SELECT * FROM time_entries WHERE id = ?", (cur.lastrowid,)
+                ).fetchone()
+            )
+        finally:
+            conn.close()
+        result = {**entry, "employee_name": employee["name"]}
+        app.state.broadcaster.publish(
+            {"type": "timeclock", "action": "clock-in", "entry": result}
+        )
+        return ok(result, status_code=201)
+
+    @app.post("/api/timeclock/clock-out", tags=["timeclock"])
+    async def timeclock_clock_out(body: ClockOutIn, _admin: str = Depends(require_admin)):
+        conn = db.connect()
+        try:
+            employee = _fetch_employee(conn, body.employee_id)
+            if employee is None:
+                raise ApiError(404, f"Employee {body.employee_id} not found")
+            if not verify_password(body.pin, employee["pin_hash"]):
+                raise ApiError(401, "Invalid PIN")
+            shift = _open_shift(conn, body.employee_id)
+            if shift is None:
+                raise ApiError(409, f"{employee['name']} has no open shift")
+
+            now = db.local_now_iso()
+            conn.execute(
+                "UPDATE time_entries SET clock_out_at = ? WHERE id = ?",
+                (now, shift["id"]),
+            )
+            conn.commit()
+            entry = db.row_to_dict(
+                conn.execute(
+                    "SELECT * FROM time_entries WHERE id = ?", (shift["id"],)
+                ).fetchone()
+            )
+        finally:
+            conn.close()
+        result = {
+            **entry,
+            "employee_name": employee["name"],
+            "duration_minutes": _shift_duration_minutes(
+                entry["clock_in_at"], entry["clock_out_at"]
+            ),
+        }
+        app.state.broadcaster.publish(
+            {"type": "timeclock", "action": "clock-out", "entry": result}
+        )
+        return ok(result)
+
+    @app.get("/api/timeclock/status", tags=["timeclock"])
+    async def timeclock_status(
+        _admin: str = Depends(require_admin),
+        employee_id: int | None = Query(default=None, gt=0),
+    ):
+        conn = db.connect()
+        try:
+            if employee_id is not None:
+                employee = _fetch_employee(conn, employee_id)
+                if employee is None:
+                    raise ApiError(404, f"Employee {employee_id} not found")
+                data = {
+                    "employee_id": employee_id,
+                    "employee_name": employee["name"],
+                    "open_shift": _open_shift(conn, employee_id),
+                }
+            else:
+                rows = conn.execute(
+                    """SELECT time_entries.*, employees.name AS employee_name
+                       FROM time_entries
+                       JOIN employees ON employees.id = time_entries.employee_id
+                       WHERE time_entries.clock_out_at IS NULL
+                       ORDER BY time_entries.clock_in_at"""
+                ).fetchall()
+                data = {"open_shifts": [db.row_to_dict(r) for r in rows]}
+        finally:
+            conn.close()
+        return ok(data)
+
+    @app.get("/api/timeclock/history", tags=["timeclock"])
+    async def timeclock_history(
+        _admin: str = Depends(require_admin),
+        employee_id: int | None = Query(default=None, gt=0),
+        start: str | None = Query(default=None, pattern=DATE_PATTERN),
+        end: str | None = Query(default=None, pattern=DATE_PATTERN),
+    ):
+        if (start is None) != (end is None):
+            raise ApiError(422, "start and end must be provided together")
+        if start and end and date.fromisoformat(end) < date.fromisoformat(start):
+            raise ApiError(422, "end must be on or after start")
+
+        clauses, params = [], []
+        if employee_id is not None:
+            clauses.append("time_entries.employee_id = ?")
+            params.append(employee_id)
+        if start and end:
+            clauses.append("substr(time_entries.clock_in_at, 1, 10) BETWEEN ? AND ?")
+            params += [start, end]
+
+        sql = """SELECT time_entries.*, employees.name AS employee_name
+                  FROM time_entries
+                  JOIN employees ON employees.id = time_entries.employee_id"""
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY time_entries.clock_in_at DESC"
+
+        conn = db.connect()
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        finally:
+            conn.close()
+
+        entries = []
+        for row in rows:
+            entry = db.row_to_dict(row)
+            entry["duration_minutes"] = (
+                _shift_duration_minutes(entry["clock_in_at"], entry["clock_out_at"])
+                if entry["clock_out_at"]
+                else None
+            )
+            entries.append(entry)
+        return ok({"entries": entries})
 
     # ---------------------------------------------------------- real-time
 

@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 TEST_ADMIN_USER = "admin"
 TEST_ADMIN_PASSWORD = "testpass123"
 TEST_POS_API_KEY = "test-pos-key"
+TEST_EMPLOYEE_PIN = "4321"
 
 
 @pytest.fixture()
@@ -43,6 +44,17 @@ def sample_product(client, admin_headers):
     resp = client.post(
         "/api/products",
         json={"sku": "COKE-330", "name": "Coca-Cola 330ml", "qty": 24, "price_cents": 250},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["data"]
+
+
+@pytest.fixture()
+def sample_employee(client, admin_headers):
+    resp = client.post(
+        "/api/employees",
+        json={"name": "Jamie Rivera", "pin": TEST_EMPLOYEE_PIN},
         headers=admin_headers,
     )
     assert resp.status_code == 201, resp.text

@@ -6,6 +6,8 @@ SKU_MAX = 64
 NAME_MAX = 200
 SOURCE_MAX = 32
 PAYMENT_METHOD_MAX = 32
+PIN_MIN = 4
+PIN_MAX = 8
 
 
 class LoginIn(BaseModel):
@@ -49,3 +51,18 @@ class CheckoutItemIn(BaseModel):
 class PosCheckoutIn(BaseModel):
     items: list[CheckoutItemIn] = Field(min_length=1)
     payment_method: str = Field(min_length=1, max_length=PAYMENT_METHOD_MAX)
+
+
+class EmployeeIn(BaseModel):
+    name: str = Field(min_length=1, max_length=NAME_MAX)
+    pin: str = Field(min_length=PIN_MIN, max_length=PIN_MAX, pattern=r"^\d+$")
+
+
+class ClockInIn(BaseModel):
+    employee_id: int = Field(gt=0)
+    pin: str = Field(min_length=1, max_length=PIN_MAX)
+
+
+class ClockOutIn(BaseModel):
+    employee_id: int = Field(gt=0)
+    pin: str = Field(min_length=1, max_length=PIN_MAX)
