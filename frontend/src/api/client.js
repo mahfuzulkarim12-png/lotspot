@@ -76,4 +76,30 @@ export const api = {
       `/api/sales/history?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`,
       { auth: true }
     ),
+
+  listEmployees: () => request('/api/employees', { auth: true }),
+  createEmployee: (employee) =>
+    request('/api/employees', { method: 'POST', body: employee, auth: true }),
+
+  clockIn: (employeeId, pin) =>
+    request('/api/timeclock/clock-in', {
+      method: 'POST',
+      body: { employee_id: employeeId, pin },
+      auth: true,
+    }),
+  clockOut: (employeeId, pin) =>
+    request('/api/timeclock/clock-out', {
+      method: 'POST',
+      body: { employee_id: employeeId, pin },
+      auth: true,
+    }),
+  timeclockStatus: () => request('/api/timeclock/status', { auth: true }),
+  timeclockHistory: ({ employeeId, start, end } = {}) => {
+    const params = new URLSearchParams();
+    if (employeeId) params.set('employee_id', employeeId);
+    if (start) params.set('start', start);
+    if (end) params.set('end', end);
+    const query = params.toString();
+    return request(`/api/timeclock/history${query ? `?${query}` : ''}`, { auth: true });
+  },
 };

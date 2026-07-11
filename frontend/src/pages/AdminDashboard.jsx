@@ -7,6 +7,8 @@ const TABS = [
   { to: 'inventory', label: 'Inventory' },
   { to: 'summary', label: 'Daily summary' },
   { to: 'history', label: 'History' },
+  { to: 'timeclock', label: 'Time clock' },
+  { to: 'timeclock-history', label: 'Shift history' },
 ];
 
 export default function AdminDashboard() {

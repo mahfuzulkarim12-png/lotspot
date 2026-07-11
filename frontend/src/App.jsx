@@ -8,6 +8,8 @@ import PosPanel from './admin/PosPanel';
 import SalesEntryPanel from './admin/SalesEntryPanel';
 import SummaryPanel from './admin/SummaryPanel';
 import DailyHistoryPanel from './admin/DailyHistoryPanel';
+import TimeclockPanel from './admin/TimeclockPanel';
+import TimeclockHistoryPanel from './admin/TimeclockHistoryPanel';
 
 function RequireAuth({ children }) {
   const { status } = useAuth();
@@ -39,6 +41,8 @@ export default function App() {
         <Route path="sale" element={<SalesEntryPanel />} />
         <Route path="summary" element={<SummaryPanel />} />
         <Route path="history" element={<DailyHistoryPanel />} />
+        <Route path="timeclock" element={<TimeclockPanel />} />
+        <Route path="timeclock-history" element={<TimeclockHistoryPanel />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
