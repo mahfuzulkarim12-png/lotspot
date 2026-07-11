@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { applyInventoryEvent, filterProducts, stockStatus } from './inventory';
+import { applyInventoryEvent, filterProducts, findProductBySku, stockStatus } from './inventory';
 
 const PRODUCTS = [
   { id: 1, sku: 'COKE-330', name: 'Coca-Cola 330ml', qty: 10, price_cents: 250 },
@@ -58,6 +58,20 @@ describe('applyInventoryEvent', () => {
   test('unknown action and null list are left alone', () => {
     expect(applyInventoryEvent(PRODUCTS, { action: 'mystery' })).toBe(PRODUCTS);
     expect(applyInventoryEvent(null, { action: 'created', product: {} })).toBeNull();
+  });
+});
+
+describe('findProductBySku', () => {
+  test('returns the product with an exact SKU match', () => {
+    expect(findProductBySku(PRODUCTS, 'COKE-330').id).toBe(1);
+  });
+
+  test('is case-sensitive, unlike the manual-search substring match', () => {
+    expect(findProductBySku(PRODUCTS, 'coke-330')).toBeNull();
+  });
+
+  test('returns null when no product has that SKU', () => {
+    expect(findProductBySku(PRODUCTS, 'NOPE-404')).toBeNull();
   });
 });
 

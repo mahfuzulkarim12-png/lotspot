@@ -70,6 +70,54 @@ test.describe('POS intake', () => {
     expect(envelope.success).toBe(false);
   });
 
+  test('a simulated rapid barcode scan adds the matching product to the cart without manual search interaction', async ({ page }) => {
+    const suffix = uniqueSuffix().slice(-6);
+    const sku = `SCN${suffix}`;
+    const name = `E2E Scan Widget ${suffix}`;
+    const product = await apiCreateProduct(token, { sku, name, qty: 20, price_cents: 350 });
+    createdId = product.id;
+
+    await page.goto('/admin/login');
+    await page.getByLabel('Username').fill('admin');
+    await page.getByLabel('Password').fill('admin');
+    await page.getByRole('button', { name: /sign in/i }).click();
+    await expect(page).toHaveURL(/\/admin\/inventory$/);
+    await page.goto('/admin/pos');
+    await expect(page).toHaveURL(/\/admin\/pos$/);
+
+    // Simulate the keyboard-wedge burst a hardware scanner sends: a fast
+    // run of keystrokes terminated by Enter, with no click on "Add to cart".
+    const searchInput = page.getByLabel('Search products');
+    await searchInput.pressSequentially(sku, { delay: 5 });
+    await searchInput.press('Enter');
+
+    await expect(page.getByText(`Scanned ${name} — added to cart.`)).toBeVisible();
+    const cartLine = page.locator('.pos-cart-line', { hasText: name });
+    await expect(cartLine).toBeVisible();
+    await expect(cartLine.getByLabel('Qty')).toHaveValue('1');
+    await expect(searchInput).toHaveValue('');
+  });
+
+  test('scanning an unknown SKU shows an error state and leaves the cart untouched', async ({ page }) => {
+    await page.goto('/admin/login');
+    await page.getByLabel('Username').fill('admin');
+    await page.getByLabel('Password').fill('admin');
+    await page.getByRole('button', { name: /sign in/i }).click();
+    await expect(page).toHaveURL(/\/admin\/inventory$/);
+    await page.goto('/admin/pos');
+    await expect(page).toHaveURL(/\/admin\/pos$/);
+
+    const searchInput = page.getByLabel('Search products');
+    const unknownSku = `SCNBAD${uniqueSuffix().slice(-6)}`;
+    await searchInput.pressSequentially(unknownSku, { delay: 5 });
+    await searchInput.press('Enter');
+
+    await expect(page.getByRole('alert')).toContainText('No product matches scanned code');
+    await expect(
+      page.getByText('Add products from the search results or quick-select grid.')
+    ).toBeVisible();
+  });
+
   test('admin POS checkout updates the daily history feed in real time', async ({ browser }) => {
     const today = todayISO();
     const baseline = await apiSalesHistory(token, today, today);

@@ -526,6 +526,10 @@ select {
   box-shadow: var(--shadow-card);
 }
 
+.pos-scan-status {
+  max-width: 560px;
+}
+
 .pos-section {
   display: flex;
   flex-direction: column;

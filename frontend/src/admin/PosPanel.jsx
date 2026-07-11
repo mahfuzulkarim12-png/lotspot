@@ -1,8 +1,15 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { api } from '../api/client';
 import { formatCents } from '../lib/money';
-import { filterProducts, stockStatus } from '../lib/inventory';
+import { filterProducts, findProductBySku, stockStatus } from '../lib/inventory';
+import { playScanTone } from '../lib/scanAudio';
+import {
+  createScanBuffer,
+  isScanComplete,
+  pushScanChar,
+  scanBufferCode,
+} from '../lib/scanDetection';
 
 const PAYMENT_METHODS = [
   { value: 'cash', label: 'Cash' },
@@ -40,6 +47,8 @@ export default function PosPanel() {
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
   const [receipt, setReceipt] = useState(null);
+  const [scanStatus, setScanStatus] = useState(null);
+  const scanBufferRef = useRef(createScanBuffer());
   const loading = products === null;
 
   const inStock = useMemo(
@@ -96,6 +105,49 @@ export default function PosPanel() {
         [product.id]: { product_id: product.id, qty: nextQty },
       };
     });
+  };
+
+  const resolveScan = (code) => {
+    const product = findProductBySku(products ?? [], code);
+    if (!product) {
+      setScanStatus({ type: 'error', message: `No product matches scanned code “${code}”.` });
+      playScanTone('error');
+      return;
+    }
+    const inCartQty = cart[product.id]?.qty ?? 0;
+    if (inCartQty >= product.qty) {
+      setScanStatus({ type: 'error', message: `${product.name} has no stock left to add.` });
+      playScanTone('error');
+      return;
+    }
+    addProduct(product, 1);
+    setScanStatus({ type: 'success', message: `Scanned ${product.name} — added to cart.` });
+    playScanTone('success');
+  };
+
+  const handleQueryChange = (e) => {
+    setQuery(e.target.value);
+    setScanStatus(null);
+  };
+
+  const handleSearchKeyDown = (e) => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+    if (e.key.length === 1) {
+      scanBufferRef.current = pushScanChar(scanBufferRef.current, e.key, Date.now());
+      return;
+    }
+
+    if (e.key !== 'Enter' && e.key !== 'Tab') return;
+
+    const buffer = scanBufferRef.current;
+    scanBufferRef.current = createScanBuffer();
+    if (!isScanComplete(buffer)) return;
+
+    e.preventDefault();
+    const code = scanBufferCode(buffer);
+    setQuery('');
+    resolveScan(code);
   };
 
   const updateQty = (product, nextValue) => {
@@ -190,10 +242,20 @@ export default function PosPanel() {
               className="input pos-search-input"
               type="search"
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search SKU or product name…"
+              onChange={handleQueryChange}
+              onKeyDown={handleSearchKeyDown}
+              placeholder="Search SKU or product name, or scan a barcode…"
+              autoFocus
             />
           </label>
+          {scanStatus && (
+            <p
+              className={`pos-scan-status ${scanStatus.type === 'success' ? 'form-success' : 'form-error'}`}
+              role={scanStatus.type === 'success' ? 'status' : 'alert'}
+            >
+              {scanStatus.message}
+            </p>
+          )}
 
           <div className="pos-section">
             <div className="section-head">

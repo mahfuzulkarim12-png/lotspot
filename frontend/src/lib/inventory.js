@@ -13,6 +13,15 @@ export function filterProducts(products, query) {
 }
 
 /**
+ * Exact, case-sensitive SKU match — mirrors the backend's
+ * `SELECT * FROM products WHERE sku = ?` used for scanner/POS intake.
+ * Returns null when no product has that exact SKU.
+ */
+export function findProductBySku(products, sku) {
+  return products.find((p) => p.sku === sku) ?? null;
+}
+
+/**
  * Apply one SSE inventory event to the current product list, immutably.
  * Events: {action: 'created'|'updated', product} | {action: 'deleted', product_id}
  */
