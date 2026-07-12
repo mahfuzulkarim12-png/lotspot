@@ -423,6 +423,9 @@ select {
   display: flex;
   gap: var(--space-1);
   border-bottom: 2px solid var(--hairline);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
 }
 
 .tab-link {
@@ -433,6 +436,8 @@ select {
   text-decoration: none;
   font-weight: 600;
   font-size: var(--text-sm);
+  white-space: nowrap;
+  flex-shrink: 0;
   transition: color var(--duration-fast), border-color var(--duration-fast);
 }
 
