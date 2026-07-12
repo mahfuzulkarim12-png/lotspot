@@ -648,12 +648,15 @@ def create_app() -> FastAPI:
                 raise ApiError(409, f"{employee['name']} already has an open shift")
 
             now = db.local_now_iso()
-            cur = conn.execute(
-                "INSERT INTO time_entries (employee_id, clock_in_at, created_at) "
-                "VALUES (?, ?, ?)",
-                (body.employee_id, now, now),
-            )
-            conn.commit()
+            try:
+                cur = conn.execute(
+                    "INSERT INTO time_entries (employee_id, clock_in_at, created_at) "
+                    "VALUES (?, ?, ?)",
+                    (body.employee_id, now, now),
+                )
+                conn.commit()
+            except sqlite3.IntegrityError:
+                raise ApiError(409, f"{employee['name']} already has an open shift")
             entry = db.row_to_dict(
                 conn.execute(
                     "SELECT * FROM time_entries WHERE id = ?", (cur.lastrowid,)

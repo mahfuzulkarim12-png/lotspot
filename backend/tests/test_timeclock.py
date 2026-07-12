@@ -245,5 +245,14 @@ def test_history_rejects_partial_date_range(client, admin_headers):
     assert resp.status_code == 422
 
 
+def test_history_rejects_end_before_start(client, admin_headers):
+    resp = client.get(
+        "/api/timeclock/history",
+        params={"start": "2026-07-31", "end": "2026-07-01"},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 422
+
+
 def test_history_requires_auth(client):
     assert client.get("/api/timeclock/history").status_code == 401

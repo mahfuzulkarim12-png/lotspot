@@ -211,6 +211,7 @@ export default function TimeclockPanel() {
             <span>New PIN</span>
             <input
               className="input inline-input"
+              type="password"
               inputMode="numeric"
               value={employeeDraft.pin}
               onChange={(e) => setEmployeeDraft((prev) => ({ ...prev, pin: e.target.value }))}
