@@ -1,6 +1,8 @@
 const { test, expect } = require('./fixtures');
 const {
   BASE_URL,
+  ADMIN_USER,
+  ADMIN_PASSWORD,
   uniqueSuffix,
   apiLogin,
   apiCreateProduct,
@@ -78,8 +80,8 @@ test.describe('POS intake', () => {
     createdId = product.id;
 
     await page.goto('/admin/login');
-    await page.getByLabel('Username').fill('admin');
-    await page.getByLabel('Password').fill('admin');
+    await page.getByLabel('Username').fill(ADMIN_USER);
+    await page.getByLabel('Password').fill(ADMIN_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();
     await expect(page).toHaveURL(/\/admin\/inventory$/);
     await page.goto('/admin/pos');
@@ -100,8 +102,8 @@ test.describe('POS intake', () => {
 
   test('scanning an unknown SKU shows an error state and leaves the cart untouched', async ({ page }) => {
     await page.goto('/admin/login');
-    await page.getByLabel('Username').fill('admin');
-    await page.getByLabel('Password').fill('admin');
+    await page.getByLabel('Username').fill(ADMIN_USER);
+    await page.getByLabel('Password').fill(ADMIN_PASSWORD);
     await page.getByRole('button', { name: /sign in/i }).click();
     await expect(page).toHaveURL(/\/admin\/inventory$/);
     await page.goto('/admin/pos');
@@ -141,8 +143,8 @@ test.describe('POS intake', () => {
 
     try {
       await loginPage.goto('/admin/login');
-      await loginPage.getByLabel('Username').fill('admin');
-      await loginPage.getByLabel('Password').fill('admin');
+      await loginPage.getByLabel('Username').fill(ADMIN_USER);
+      await loginPage.getByLabel('Password').fill(ADMIN_PASSWORD);
       await loginPage.getByRole('button', { name: /sign in/i }).click();
       await expect(loginPage).toHaveURL(/\/admin\/inventory$/);
       await loginPage.goto('/admin/pos');
