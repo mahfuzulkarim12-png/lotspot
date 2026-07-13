@@ -79,6 +79,51 @@ def test_sse_endpoint_wire_format_and_cleanup(tmp_path, monkeypatch):
     asyncio.run(scenario())
 
 
+def test_sse_emits_keepalive_after_heartbeat_timeout(tmp_path, monkeypatch):
+    """A subscriber that receives no events must still see a ': keepalive'
+    comment once the configured heartbeat interval elapses, and the stream
+    must keep delivering real events afterwards. Uses a tiny interval so the
+    test stays fast and deterministic instead of waiting the real 15s
+    default."""
+    monkeypatch.setenv("LOTSPOT_DB", str(tmp_path / "sse-heartbeat.db"))
+    monkeypatch.setenv("LOTSPOT_ADMIN_PASSWORD", "testpass123")
+    monkeypatch.setenv("LOTSPOT_SSE_HEARTBEAT", "0.05")
+
+    from app import create_app
+
+    app = create_app()
+    route = next(r for r in app.routes if getattr(r, "path", None) == "/api/events")
+
+    async def scenario():
+        response = await route.endpoint()
+        chunks = response.body_iterator
+
+        first = await asyncio.wait_for(anext(chunks), timeout=1)
+        assert first == 'data: {"type": "connected"}\n\n'
+
+        # No events published: next chunk must be the heartbeat keepalive,
+        # not a dropped/hung connection.
+        second = await asyncio.wait_for(anext(chunks), timeout=1)
+        assert second == ": keepalive\n\n"
+
+        # A second silent interval produces another keepalive (it repeats,
+        # not a one-shot).
+        third = await asyncio.wait_for(anext(chunks), timeout=1)
+        assert third == ": keepalive\n\n"
+
+        # Once real activity arrives, it is still delivered normally after
+        # the heartbeats.
+        app.state.broadcaster.publish({"type": "inventory", "action": "updated", "product": {"id": 1}})
+        fourth = await asyncio.wait_for(anext(chunks), timeout=1)
+        assert fourth.startswith("data: ")
+        payload = json.loads(fourth[len("data: "):])
+        assert payload["type"] == "inventory"
+
+        await chunks.aclose()
+
+    asyncio.run(scenario())
+
+
 def _drain(queue):
     events = []
     while not queue.empty():

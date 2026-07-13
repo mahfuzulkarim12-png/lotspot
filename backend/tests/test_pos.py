@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
 from tests.conftest import TEST_POS_API_KEY
@@ -56,6 +57,47 @@ def test_pos_sale_custom_unit_price_overrides_product_price(
     sale = resp.json()["data"]
     assert sale["unit_price_cents"] == 199
     assert sale["total_cents"] == 199
+
+
+def test_pos_sale_concurrent_requests_never_oversell(client, admin_headers):
+    """Fires more concurrent sale requests than there is stock for one SKU.
+    The atomic `UPDATE ... WHERE qty >= ?` guard in `_record_sale` must let
+    exactly as many requests succeed as there is stock, reject the rest with
+    409, and never leave qty negative or double-decremented."""
+    product = client.post(
+        "/api/products",
+        json={"sku": "RACE-1", "name": "Race Item", "qty": 10, "price_cents": 100},
+        headers=admin_headers,
+    ).json()["data"]
+
+    request_count = 25
+
+    def buy_one():
+        return client.post(
+            "/api/pos/sales",
+            json={"sku": product["sku"], "qty": 1},
+            headers={"X-API-Key": TEST_POS_API_KEY},
+        )
+
+    with ThreadPoolExecutor(max_workers=request_count) as pool:
+        responses = list(pool.map(lambda _: buy_one(), range(request_count)))
+
+    statuses = [resp.status_code for resp in responses]
+    successes = [s for s in statuses if s == 201]
+    rejections = [s for s in statuses if s == 409]
+
+    assert len(successes) == 10
+    assert len(rejections) == request_count - 10
+    assert set(statuses) == {201, 409}
+
+    resp = client.get("/api/products")
+    final = next(p for p in resp.json()["data"] if p["sku"] == "RACE-1")
+    assert final["qty"] == 0
+
+    resp = client.get("/api/sales", headers=admin_headers)
+    race_sales = [s for s in resp.json()["data"] if s["sku"] == "RACE-1"]
+    assert len(race_sales) == 10
+    assert sum(s["qty"] for s in race_sales) == 10
 
 
 def test_pos_disabled_when_no_key_configured(tmp_path, monkeypatch):
