@@ -184,6 +184,66 @@ def test_pos_checkout_requires_auth(client):
     assert resp.status_code == 401
 
 
+def test_pos_checkout_receipt_includes_tax_breakdown(client, admin_headers):
+    category = client.post(
+        "/api/tax-categories", json={"name": "Taxed Goods"}, headers=admin_headers
+    ).json()["data"]
+    state = client.post(
+        "/api/tax-accounts",
+        json={
+            "name": "State Tax",
+            "jurisdiction": "OK State",
+            "rate_bps": 450,
+            "effective_from": "2000-01-01",
+        },
+        headers=admin_headers,
+    ).json()["data"]
+    city = client.post(
+        "/api/tax-accounts",
+        json={
+            "name": "City Tax",
+            "jurisdiction": "Tulsa City",
+            "rate_bps": 200,
+            "effective_from": "2000-01-01",
+        },
+        headers=admin_headers,
+    ).json()["data"]
+    client.put(
+        f"/api/tax-categories/{category['id']}/tax-accounts",
+        json={"tax_account_ids": [state["id"], city["id"]]},
+        headers=admin_headers,
+    )
+
+    taxed = client.post(
+        "/api/products",
+        json={
+            "sku": "TAXED-CHECKOUT",
+            "name": "Taxed Checkout Item",
+            "qty": 10,
+            "price_cents": 1000,
+            "tax_category_id": category["id"],
+        },
+        headers=admin_headers,
+    ).json()["data"]
+
+    resp = client.post(
+        "/api/pos/checkout",
+        json={"payment_method": "cash", "items": [{"product_id": taxed["id"], "qty": 1}]},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    checkout = resp.json()["data"]
+
+    assert checkout["subtotal_cents"] == 1000
+    assert checkout["tax_cents"] == 45 + 20
+    assert checkout["total_cents"] == checkout["subtotal_cents"]
+    assert checkout["grand_total_cents"] == checkout["subtotal_cents"] + checkout["tax_cents"]
+    assert {row["tax_account_name"]: row["tax_cents"] for row in checkout["tax_breakdown"]} == {
+        "State Tax": 45,
+        "City Tax": 20,
+    }
+
+
 def test_pos_checkout_insufficient_stock_rolls_back(client, admin_headers, sample_product):
     resp = client.post(
         "/api/pos/checkout",
