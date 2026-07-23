@@ -11,7 +11,7 @@ import json
 import os
 import sqlite3
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Query, Request
@@ -46,6 +46,13 @@ DATE_PATTERN = r"^\d{4}-\d{2}-\d{2}$"
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 DEFAULT_SSE_HEARTBEAT_SECONDS = 15
 TOP_ITEMS_LIMIT = 5
+# store_id/sold_at_utc exist only for a future HQ multi-store sync; they must
+# never reach an API response, an SSE broadcast, or the frontend.
+_INTERNAL_ONLY_FIELDS = ("store_id", "sold_at_utc")
+
+
+def _public_row(row: dict) -> dict:
+    return {k: v for k, v in row.items() if k not in _INTERNAL_ONLY_FIELDS}
 
 
 class ApiError(Exception):
@@ -78,18 +85,18 @@ def require_admin(request: Request) -> str:
 
 def _fetch_product(conn: sqlite3.Connection, product_id: int) -> dict | None:
     row = conn.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
-    return db.row_to_dict(row) if row else None
+    return _public_row(db.row_to_dict(row)) if row else None
 
 
 def _fetch_employee(conn: sqlite3.Connection, employee_id: int) -> dict | None:
     row = conn.execute(
         "SELECT * FROM employees WHERE id = ?", (employee_id,)
     ).fetchone()
-    return db.row_to_dict(row) if row else None
+    return _public_row(db.row_to_dict(row)) if row else None
 
 
 def _public_employee(employee: dict) -> dict:
-    return {k: v for k, v in employee.items() if k != "pin_hash"}
+    return {k: v for k, v in _public_row(employee).items() if k != "pin_hash"}
 
 
 def _open_shift(conn: sqlite3.Connection, employee_id: int) -> dict | None:
@@ -97,7 +104,7 @@ def _open_shift(conn: sqlite3.Connection, employee_id: int) -> dict | None:
         "SELECT * FROM time_entries WHERE employee_id = ? AND clock_out_at IS NULL",
         (employee_id,),
     ).fetchone()
-    return db.row_to_dict(row) if row else None
+    return _public_row(db.row_to_dict(row)) if row else None
 
 
 def _shift_duration_minutes(clock_in_at: str, clock_out_at: str) -> int:
@@ -169,6 +176,7 @@ def _insert_sale_row(
     total_cents (and unit_price_cents) stay tax-exclusive; tax_cents is a
     separate column."""
     now = db.local_now_iso()
+    sold_at_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     price = unit_price_cents if unit_price_cents is not None else product["price_cents"]
     total_cents = qty * price
     tax_cents, tax_category_name, _tax_lines = tax.compute_line_tax(
@@ -178,8 +186,8 @@ def _insert_sale_row(
         """INSERT INTO sales
            (product_id, transaction_id, product_name, sku, qty, unit_price_cents,
             total_cents, tax_cents, tax_category_name, source, payment_method,
-            sold_at, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            sold_at, sold_at_utc, store_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             product["id"],
             transaction_id,
@@ -193,6 +201,8 @@ def _insert_sale_row(
             source,
             payment_method,
             now,
+            sold_at_utc,
+            db.get_store_id(),
             now,
         ),
     )
@@ -211,8 +221,8 @@ def _insert_sale_row(
                 now,
             ),
         )
-    sale = db.row_to_dict(
-        conn.execute("SELECT * FROM sales WHERE id = ?", (sale_id,)).fetchone()
+    sale = _public_row(
+        db.row_to_dict(conn.execute("SELECT * FROM sales WHERE id = ?", (sale_id,)).fetchone())
     )
     tax_line_rows = conn.execute(
         "SELECT * FROM sale_tax_lines WHERE sale_id = ? ORDER BY id", (sale_id,)
@@ -451,7 +461,7 @@ def create_app() -> FastAPI:
             rows = conn.execute(sql, params).fetchall()
         finally:
             conn.close()
-        return ok([db.row_to_dict(r) for r in rows])
+        return ok([_public_row(db.row_to_dict(r)) for r in rows])
 
     @app.post("/api/products", status_code=201, tags=["products"])
     async def create_product(body: ProductIn, _admin: str = Depends(require_admin)):
@@ -466,9 +476,18 @@ def create_app() -> FastAPI:
             try:
                 cur = conn.execute(
                     """INSERT INTO products
-                       (sku, name, qty, price_cents, tax_category_id, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (body.sku, body.name, body.qty, body.price_cents, tax_category_id, now, now),
+                       (sku, name, qty, price_cents, tax_category_id, store_id, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        body.sku,
+                        body.name,
+                        body.qty,
+                        body.price_cents,
+                        tax_category_id,
+                        db.get_store_id(),
+                        now,
+                        now,
+                    ),
                 )
                 conn.commit()
             except sqlite3.IntegrityError:
@@ -794,7 +813,7 @@ def create_app() -> FastAPI:
             ).fetchall()
         finally:
             conn.close()
-        return ok([db.row_to_dict(r) for r in rows])
+        return ok([_public_row(db.row_to_dict(r)) for r in rows])
 
     @app.get("/api/sales/summary", tags=["sales"])
     async def sales_summary(
@@ -893,8 +912,8 @@ def create_app() -> FastAPI:
         conn = db.connect()
         try:
             cur = conn.execute(
-                "INSERT INTO employees (name, pin_hash, created_at) VALUES (?, ?, ?)",
-                (body.name, hash_password(body.pin), now),
+                "INSERT INTO employees (name, pin_hash, store_id, created_at) VALUES (?, ?, ?, ?)",
+                (body.name, hash_password(body.pin), db.get_store_id(), now),
             )
             conn.commit()
             employee = _fetch_employee(conn, cur.lastrowid)
@@ -930,17 +949,19 @@ def create_app() -> FastAPI:
             now = db.local_now_iso()
             try:
                 cur = conn.execute(
-                    "INSERT INTO time_entries (employee_id, clock_in_at, created_at) "
-                    "VALUES (?, ?, ?)",
-                    (body.employee_id, now, now),
+                    "INSERT INTO time_entries (employee_id, clock_in_at, store_id, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (body.employee_id, now, db.get_store_id(), now),
                 )
                 conn.commit()
             except sqlite3.IntegrityError:
                 raise ApiError(409, f"{employee['name']} already has an open shift")
-            entry = db.row_to_dict(
-                conn.execute(
-                    "SELECT * FROM time_entries WHERE id = ?", (cur.lastrowid,)
-                ).fetchone()
+            entry = _public_row(
+                db.row_to_dict(
+                    conn.execute(
+                        "SELECT * FROM time_entries WHERE id = ?", (cur.lastrowid,)
+                    ).fetchone()
+                )
             )
         finally:
             conn.close()
@@ -969,10 +990,12 @@ def create_app() -> FastAPI:
                 (now, shift["id"]),
             )
             conn.commit()
-            entry = db.row_to_dict(
-                conn.execute(
-                    "SELECT * FROM time_entries WHERE id = ?", (shift["id"],)
-                ).fetchone()
+            entry = _public_row(
+                db.row_to_dict(
+                    conn.execute(
+                        "SELECT * FROM time_entries WHERE id = ?", (shift["id"],)
+                    ).fetchone()
+                )
             )
         finally:
             conn.close()
@@ -1012,7 +1035,7 @@ def create_app() -> FastAPI:
                        WHERE time_entries.clock_out_at IS NULL
                        ORDER BY time_entries.clock_in_at"""
                 ).fetchall()
-                data = {"open_shifts": [db.row_to_dict(r) for r in rows]}
+                data = {"open_shifts": [_public_row(db.row_to_dict(r)) for r in rows]}
         finally:
             conn.close()
         return ok(data)
@@ -1052,7 +1075,7 @@ def create_app() -> FastAPI:
 
         entries = []
         for row in rows:
-            entry = db.row_to_dict(row)
+            entry = _public_row(db.row_to_dict(row))
             entry["duration_minutes"] = (
                 _shift_duration_minutes(entry["clock_in_at"], entry["clock_out_at"])
                 if entry["clock_out_at"]

@@ -1,3 +1,7 @@
+import re
+from datetime import date
+
+
 def _add_product(client, headers, sku, name, qty, price_cents):
     resp = client.post(
         "/api/products",
@@ -94,6 +98,31 @@ def test_list_sales_other_day_is_empty(client, admin_headers, sample_product):
     )
     resp = client.get("/api/sales", params={"date": "2000-01-01"}, headers=admin_headers)
     assert resp.json()["data"] == []
+
+
+def test_sold_at_stays_naive_local_and_day_filtering_still_works(
+    client, admin_headers, sample_product
+):
+    """sold_at must keep its naive-local 'YYYY-MM-DDTHH:MM:SS' shape (no
+    timezone suffix) since the summary/day filters do a plain prefix match
+    against it — adding sold_at_utc must not disturb that."""
+    resp = client.post(
+        "/api/sales",
+        json={"product_id": sample_product["id"], "qty": 1},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    sale = resp.json()["data"]
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", sale["sold_at"])
+
+    today = date.today().isoformat()
+    resp = client.get(
+        "/api/sales/summary", params={"date": today}, headers=admin_headers
+    )
+    assert resp.status_code == 200, resp.text
+    summary = resp.json()["data"]
+    assert summary["transaction_count"] == 1
+    assert summary["total_items_sold"] == 1
 
 
 def test_daily_summary_totals_and_top_items(client, admin_headers):

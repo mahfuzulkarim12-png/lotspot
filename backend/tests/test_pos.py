@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date
+from datetime import date, datetime
 
 from tests.conftest import TEST_POS_API_KEY
 
@@ -182,6 +182,42 @@ def test_pos_checkout_requires_auth(client):
         json={"payment_method": "cash", "items": [{"product_id": 1, "qty": 1}]},
     )
     assert resp.status_code == 401
+
+
+def test_pos_checkout_stamps_store_id_and_sold_at_utc(
+    client, admin_headers, sample_product, monkeypatch
+):
+    """store_id/sold_at_utc exist only for a future HQ sync and must never
+    reach the API response, so this asserts them by reading the DB row
+    directly rather than trusting the JSON payload."""
+    monkeypatch.setenv("LOTSPOT_STORE_ID", "store-99")
+
+    resp = client.post(
+        "/api/pos/checkout",
+        json={
+            "payment_method": "cash",
+            "items": [{"product_id": sample_product["id"], "qty": 1}],
+        },
+        headers=admin_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    checkout = resp.json()["data"]
+    sale = checkout["line_items"][0]
+    assert "store_id" not in sale
+    assert "sold_at_utc" not in sale
+
+    import db
+
+    conn = db.connect()
+    try:
+        row = conn.execute("SELECT * FROM sales WHERE id = ?", (sale["id"],)).fetchone()
+    finally:
+        conn.close()
+
+    assert row["store_id"] == "store-99"
+    assert row["sold_at_utc"] is not None
+    parsed = datetime.fromisoformat(row["sold_at_utc"])
+    assert parsed.utcoffset().total_seconds() == 0
 
 
 def test_pos_checkout_receipt_includes_tax_breakdown(client, admin_headers):
