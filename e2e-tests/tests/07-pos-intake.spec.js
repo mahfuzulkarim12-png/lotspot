@@ -167,12 +167,18 @@ test.describe('POS intake', () => {
         total_revenue_cents: baseDay.total_revenue_cents + 650,
       };
 
+      // exact: true avoids false matches against other cells in the row
+      // (e.g. the date cell or the tax-collected cell containing the same digit).
       const historyRow = historyPage.locator('tr', { hasText: today });
-      await expect(historyRow.getByText(String(expectedHistory.transaction_count))).toBeVisible({
-        timeout: 3000,
-      });
-      await expect(historyRow.getByText(String(expectedHistory.total_items_sold))).toBeVisible();
-      await expect(historyRow.getByText(formatCents(expectedHistory.total_revenue_cents))).toBeVisible();
+      await expect(
+        historyRow.getByText(String(expectedHistory.transaction_count), { exact: true })
+      ).toBeVisible({ timeout: 3000 });
+      await expect(
+        historyRow.getByText(String(expectedHistory.total_items_sold), { exact: true })
+      ).toBeVisible();
+      await expect(
+        historyRow.getByText(formatCents(expectedHistory.total_revenue_cents), { exact: true })
+      ).toBeVisible();
     } finally {
       await context.close();
       await apiDeleteProduct(token, soda.id).catch(() => {});

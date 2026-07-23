@@ -63,7 +63,8 @@ test.describe('Daily summary', () => {
 
     await page.goto('/admin/summary');
     // Ensure we're on today (default) and data has loaded.
-    await expect(page.locator('.stat-tile')).toHaveCount(3);
+    // Net revenue, Tax collected, Items sold, Transactions.
+    await expect(page.locator('.stat-tile')).toHaveCount(4);
 
     const expectedRevenue = baseline.total_revenue_cents + SALE_QTY * 1000;
     const expectedItems = baseline.total_items_sold + SALE_QTY;
