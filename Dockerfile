@@ -10,8 +10,18 @@ RUN npm run build
 
 FROM python:3.12-slim
 WORKDIR /app
+
+# Apply the base-image CVEs that Debian has actually published a fix for.
+# The rest of the trixie findings have no upstream fix yet — each one is
+# triaged in deploy/security/trivy-triage.md and gated by deploy/tests.
+RUN apt-get update \
+ && apt-get upgrade -y --no-install-recommends liblzma5 \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY backend/requirements.txt backend/requirements.txt
-RUN pip install --no-cache-dir -r backend/requirements.txt
+# The pip shipped in the base image carries 5 known CVEs; upgrade before use.
+RUN pip install --no-cache-dir --upgrade pip \
+ && pip install --no-cache-dir -r backend/requirements.txt
 COPY backend/ backend/
 COPY --from=frontend-build /app/frontend/dist frontend/dist
 
