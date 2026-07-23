@@ -21,6 +21,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
 
 import db
+import tax
 from auth import TokenStore, hash_password, seed_admin, verify_password
 from events import Broadcaster
 from models import (
@@ -34,6 +35,11 @@ from models import (
     ProductIn,
     ProductUpdate,
     SaleIn,
+    TaxAccountIn,
+    TaxAccountUpdate,
+    TaxCategoryAccountsIn,
+    TaxCategoryIn,
+    TaxCategoryUpdate,
 )
 
 DATE_PATTERN = r"^\d{4}-\d{2}-\d{2}$"
@@ -107,7 +113,8 @@ def _sales_daily_totals(
         """SELECT substr(sold_at, 1, 10) AS day,
                   COUNT(DISTINCT transaction_id) AS transaction_count,
                   COALESCE(SUM(qty), 0) AS total_items_sold,
-                  COALESCE(SUM(total_cents), 0) AS total_revenue_cents
+                  COALESCE(SUM(total_cents), 0) AS total_revenue_cents,
+                  COALESCE(SUM(tax_cents), 0) AS total_tax_cents
            FROM sales
            WHERE substr(sold_at, 1, 10) BETWEEN ? AND ?
            GROUP BY day
@@ -120,6 +127,7 @@ def _sales_daily_totals(
             "transaction_count": row["transaction_count"],
             "total_items_sold": row["total_items_sold"],
             "total_revenue_cents": row["total_revenue_cents"],
+            "total_tax_cents": row["total_tax_cents"],
         }
         for row in rows
     }
@@ -138,6 +146,7 @@ def _sales_daily_totals(
                     "transaction_count": 0,
                     "total_items_sold": 0,
                     "total_revenue_cents": 0,
+                    "total_tax_cents": 0,
                 },
             )
         )
@@ -154,13 +163,23 @@ def _insert_sale_row(
     transaction_id: str,
     payment_method: str | None,
 ) -> dict:
+    """Single insert chokepoint for both manual/POS-terminal sales
+    (_record_sale) and bulk checkout (_record_checkout). Tax is computed
+    here so every sale row is taxed the same way regardless of entry point.
+    total_cents (and unit_price_cents) stay tax-exclusive; tax_cents is a
+    separate column."""
     now = db.local_now_iso()
     price = unit_price_cents if unit_price_cents is not None else product["price_cents"]
+    total_cents = qty * price
+    tax_cents, tax_category_name, _tax_lines = tax.compute_line_tax(
+        conn, product.get("tax_category_id"), total_cents, now
+    )
     cur = conn.execute(
         """INSERT INTO sales
            (product_id, transaction_id, product_name, sku, qty, unit_price_cents,
-            total_cents, source, payment_method, sold_at, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            total_cents, tax_cents, tax_category_name, source, payment_method,
+            sold_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             product["id"],
             transaction_id,
@@ -168,7 +187,9 @@ def _insert_sale_row(
             product["sku"],
             qty,
             price,
-            qty * price,
+            total_cents,
+            tax_cents,
+            tax_category_name,
             source,
             payment_method,
             now,
@@ -176,9 +197,29 @@ def _insert_sale_row(
         ),
     )
     sale_id = cur.lastrowid
-    return db.row_to_dict(
+    for line in _tax_lines:
+        conn.execute(
+            """INSERT INTO sale_tax_lines
+               (sale_id, tax_account_id, tax_account_name, rate_bps, tax_cents, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                sale_id,
+                line["tax_account_id"],
+                line["tax_account_name"],
+                line["rate_bps"],
+                line["tax_cents"],
+                now,
+            ),
+        )
+    sale = db.row_to_dict(
         conn.execute("SELECT * FROM sales WHERE id = ?", (sale_id,)).fetchone()
     )
+    tax_line_rows = conn.execute(
+        "SELECT * FROM sale_tax_lines WHERE sale_id = ? ORDER BY id", (sale_id,)
+    ).fetchall()
+    sale["tax_lines"] = [db.row_to_dict(r) for r in tax_line_rows]
+    sale["grand_total_cents"] = sale["total_cents"] + sale["tax_cents"]
+    return sale
 
 
 def _record_sale(
@@ -294,13 +335,20 @@ def _record_checkout(
         broadcaster.publish({"type": "sale", "action": "created", "sale": sale})
 
     total_qty = sum(item["qty"] for item in sales)
-    total_cents = sum(item["total_cents"] for item in sales)
+    subtotal_cents = sum(item["total_cents"] for item in sales)
+    tax_cents = sum(item["tax_cents"] for item in sales)
     return {
         "transaction_id": transaction_id,
         "payment_method": payment_method,
         "line_items": sales,
         "total_qty": total_qty,
-        "total_cents": total_cents,
+        # total_cents stays tax-exclusive (same meaning as before tax existed);
+        # subtotal_cents is the explicit name for the same value.
+        "total_cents": subtotal_cents,
+        "subtotal_cents": subtotal_cents,
+        "tax_cents": tax_cents,
+        "grand_total_cents": subtotal_cents + tax_cents,
+        "tax_breakdown": tax.aggregate_tax_breakdown(sales),
         "item_count": len(sales),
         "products": refreshed_products,
     }
@@ -410,11 +458,17 @@ def create_app() -> FastAPI:
         now = db.local_now_iso()
         conn = db.connect()
         try:
+            tax_category_id = body.tax_category_id
+            if tax_category_id is None:
+                tax_category_id = tax.default_tax_category_id(conn)
+            elif not tax.tax_category_exists(conn, tax_category_id):
+                raise ApiError(404, f"Tax category {tax_category_id} not found")
             try:
                 cur = conn.execute(
-                    """INSERT INTO products (sku, name, qty, price_cents, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    (body.sku, body.name, body.qty, body.price_cents, now, now),
+                    """INSERT INTO products
+                       (sku, name, qty, price_cents, tax_category_id, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (body.sku, body.name, body.qty, body.price_cents, tax_category_id, now, now),
                 )
                 conn.commit()
             except sqlite3.IntegrityError:
@@ -437,6 +491,10 @@ def create_app() -> FastAPI:
             product = _fetch_product(conn, product_id)
             if product is None:
                 raise ApiError(404, f"Product {product_id} not found")
+            if changes.get("tax_category_id") is not None and not tax.tax_category_exists(
+                conn, changes["tax_category_id"]
+            ):
+                raise ApiError(404, f"Tax category {changes['tax_category_id']} not found")
             if changes:
                 assignments = ", ".join(f"{field} = ?" for field in changes)
                 try:
@@ -471,6 +529,227 @@ def create_app() -> FastAPI:
             {"type": "inventory", "action": "deleted", "product_id": product_id}
         )
         return ok({"deleted": product_id})
+
+    # ---------------------------------------------------------------- tax
+
+    @app.get("/api/tax-accounts", tags=["tax"])
+    async def list_tax_accounts(_admin: str = Depends(require_admin)):
+        conn = db.connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM tax_accounts ORDER BY name COLLATE NOCASE"
+            ).fetchall()
+        finally:
+            conn.close()
+        return ok([db.row_to_dict(r) for r in rows])
+
+    @app.post("/api/tax-accounts", status_code=201, tags=["tax"])
+    async def create_tax_account(body: TaxAccountIn, _admin: str = Depends(require_admin)):
+        if body.effective_to is not None and body.effective_to < body.effective_from:
+            raise ApiError(422, "effective_to must be on or after effective_from")
+        now = db.local_now_iso()
+        conn = db.connect()
+        try:
+            cur = conn.execute(
+                """INSERT INTO tax_accounts
+                   (name, jurisdiction, rate_bps, effective_from, effective_to, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    body.name,
+                    body.jurisdiction,
+                    body.rate_bps,
+                    body.effective_from,
+                    body.effective_to,
+                    now,
+                ),
+            )
+            conn.commit()
+            account = db.row_to_dict(
+                conn.execute(
+                    "SELECT * FROM tax_accounts WHERE id = ?", (cur.lastrowid,)
+                ).fetchone()
+            )
+        finally:
+            conn.close()
+        return ok(account, status_code=201)
+
+    @app.put("/api/tax-accounts/{tax_account_id}", tags=["tax"])
+    async def update_tax_account(
+        tax_account_id: int, body: TaxAccountUpdate, _admin: str = Depends(require_admin)
+    ):
+        changes = body.model_dump(exclude_unset=True)
+        conn = db.connect()
+        try:
+            existing = conn.execute(
+                "SELECT * FROM tax_accounts WHERE id = ?", (tax_account_id,)
+            ).fetchone()
+            if existing is None:
+                raise ApiError(404, f"Tax account {tax_account_id} not found")
+            merged = {**db.row_to_dict(existing), **changes}
+            if merged["effective_to"] is not None and merged["effective_to"] < merged["effective_from"]:
+                raise ApiError(422, "effective_to must be on or after effective_from")
+            if changes:
+                assignments = ", ".join(f"{field} = ?" for field in changes)
+                conn.execute(
+                    f"UPDATE tax_accounts SET {assignments} WHERE id = ?",
+                    (*changes.values(), tax_account_id),
+                )
+                conn.commit()
+            account = db.row_to_dict(
+                conn.execute(
+                    "SELECT * FROM tax_accounts WHERE id = ?", (tax_account_id,)
+                ).fetchone()
+            )
+        finally:
+            conn.close()
+        return ok(account)
+
+    @app.delete("/api/tax-accounts/{tax_account_id}", tags=["tax"])
+    async def delete_tax_account(tax_account_id: int, _admin: str = Depends(require_admin)):
+        conn = db.connect()
+        try:
+            existing = conn.execute(
+                "SELECT * FROM tax_accounts WHERE id = ?", (tax_account_id,)
+            ).fetchone()
+            if existing is None:
+                raise ApiError(404, f"Tax account {tax_account_id} not found")
+            conn.execute("DELETE FROM tax_accounts WHERE id = ?", (tax_account_id,))
+            conn.commit()
+        finally:
+            conn.close()
+        return ok({"deleted": tax_account_id})
+
+    def _tax_category_with_accounts(conn: sqlite3.Connection, category_id: int) -> dict:
+        category = db.row_to_dict(
+            conn.execute(
+                "SELECT * FROM tax_categories WHERE id = ?", (category_id,)
+            ).fetchone()
+        )
+        account_rows = conn.execute(
+            "SELECT tax_account_id FROM tax_category_accounts WHERE tax_category_id = ?",
+            (category_id,),
+        ).fetchall()
+        category["tax_account_ids"] = [row["tax_account_id"] for row in account_rows]
+        return category
+
+    @app.get("/api/tax-categories", tags=["tax"])
+    async def list_tax_categories(_admin: str = Depends(require_admin)):
+        conn = db.connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM tax_categories ORDER BY name COLLATE NOCASE"
+            ).fetchall()
+            categories = [_tax_category_with_accounts(conn, row["id"]) for row in rows]
+        finally:
+            conn.close()
+        return ok(categories)
+
+    @app.post("/api/tax-categories", status_code=201, tags=["tax"])
+    async def create_tax_category(body: TaxCategoryIn, _admin: str = Depends(require_admin)):
+        now = db.local_now_iso()
+        conn = db.connect()
+        try:
+            try:
+                cur = conn.execute(
+                    "INSERT INTO tax_categories (name, created_at) VALUES (?, ?)",
+                    (body.name, now),
+                )
+                conn.commit()
+            except sqlite3.IntegrityError:
+                raise ApiError(409, f"A tax category named {body.name!r} already exists")
+            category = _tax_category_with_accounts(conn, cur.lastrowid)
+        finally:
+            conn.close()
+        return ok(category, status_code=201)
+
+    @app.put("/api/tax-categories/{tax_category_id}", tags=["tax"])
+    async def update_tax_category(
+        tax_category_id: int, body: TaxCategoryUpdate, _admin: str = Depends(require_admin)
+    ):
+        changes = body.model_dump(exclude_unset=True)
+        conn = db.connect()
+        try:
+            existing = conn.execute(
+                "SELECT * FROM tax_categories WHERE id = ?", (tax_category_id,)
+            ).fetchone()
+            if existing is None:
+                raise ApiError(404, f"Tax category {tax_category_id} not found")
+            if changes:
+                try:
+                    conn.execute(
+                        "UPDATE tax_categories SET name = ? WHERE id = ?",
+                        (changes["name"], tax_category_id),
+                    )
+                    conn.commit()
+                except sqlite3.IntegrityError:
+                    raise ApiError(
+                        409, f"A tax category named {changes.get('name')!r} already exists"
+                    )
+            category = _tax_category_with_accounts(conn, tax_category_id)
+        finally:
+            conn.close()
+        return ok(category)
+
+    @app.delete("/api/tax-categories/{tax_category_id}", tags=["tax"])
+    async def delete_tax_category(tax_category_id: int, _admin: str = Depends(require_admin)):
+        conn = db.connect()
+        try:
+            existing = conn.execute(
+                "SELECT * FROM tax_categories WHERE id = ?", (tax_category_id,)
+            ).fetchone()
+            if existing is None:
+                raise ApiError(404, f"Tax category {tax_category_id} not found")
+            in_use = conn.execute(
+                "SELECT COUNT(*) FROM products WHERE tax_category_id = ?", (tax_category_id,)
+            ).fetchone()[0]
+            if in_use:
+                raise ApiError(
+                    409, f"Tax category {tax_category_id} is assigned to {in_use} product(s)"
+                )
+            conn.execute("DELETE FROM tax_categories WHERE id = ?", (tax_category_id,))
+            conn.commit()
+        finally:
+            conn.close()
+        return ok({"deleted": tax_category_id})
+
+    @app.put("/api/tax-categories/{tax_category_id}/tax-accounts", tags=["tax"])
+    async def set_tax_category_accounts(
+        tax_category_id: int,
+        body: TaxCategoryAccountsIn,
+        _admin: str = Depends(require_admin),
+    ):
+        conn = db.connect()
+        try:
+            existing = conn.execute(
+                "SELECT * FROM tax_categories WHERE id = ?", (tax_category_id,)
+            ).fetchone()
+            if existing is None:
+                raise ApiError(404, f"Tax category {tax_category_id} not found")
+            if body.tax_account_ids:
+                placeholders = ",".join("?" for _ in body.tax_account_ids)
+                found = conn.execute(
+                    f"SELECT id FROM tax_accounts WHERE id IN ({placeholders})",
+                    body.tax_account_ids,
+                ).fetchall()
+                found_ids = {row["id"] for row in found}
+                missing = [i for i in body.tax_account_ids if i not in found_ids]
+                if missing:
+                    raise ApiError(404, f"Tax account {missing[0]} not found")
+            conn.execute(
+                "DELETE FROM tax_category_accounts WHERE tax_category_id = ?",
+                (tax_category_id,),
+            )
+            for account_id in body.tax_account_ids:
+                conn.execute(
+                    """INSERT INTO tax_category_accounts (tax_category_id, tax_account_id)
+                       VALUES (?, ?)""",
+                    (tax_category_id, account_id),
+                )
+            conn.commit()
+            category = _tax_category_with_accounts(conn, tax_category_id)
+        finally:
+            conn.close()
+        return ok(category)
 
     # -------------------------------------------------------------- sales
 
@@ -571,6 +850,7 @@ def create_app() -> FastAPI:
                         "transaction_count": row["transaction_count"],
                         "total_items_sold": row["total_items_sold"],
                         "total_revenue_cents": row["total_revenue_cents"],
+                        "total_tax_cents": row["total_tax_cents"],
                     }
                     for row in totals
                 ],
