@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS products (
     name TEXT NOT NULL,
     qty INTEGER NOT NULL DEFAULT 0 CHECK (qty >= 0),
     price_cents INTEGER NOT NULL CHECK (price_cents >= 0),
+    store_id TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -47,6 +48,10 @@ CREATE TABLE IF NOT EXISTS sales (
     source TEXT NOT NULL DEFAULT 'manual',
     payment_method TEXT,
     sold_at TEXT NOT NULL,
+    -- UTC mirror of sold_at for a future HQ sync; sold_at itself stays
+    -- naive-local because day filtering depends on its plain prefix match
+    sold_at_utc TEXT,
+    store_id TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
 
@@ -108,6 +113,7 @@ CREATE TABLE IF NOT EXISTS employees (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     pin_hash TEXT NOT NULL,
+    store_id TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
 
@@ -116,6 +122,7 @@ CREATE TABLE IF NOT EXISTS time_entries (
     employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
     clock_in_at TEXT NOT NULL,
     clock_out_at TEXT,
+    store_id TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
 
@@ -135,6 +142,10 @@ def get_db_path() -> str:
     )
 
 
+def get_store_id() -> str:
+    return os.environ.get("LOTSPOT_STORE_ID", "store-01")
+
+
 def connect() -> sqlite3.Connection:
     conn = sqlite3.connect(get_db_path())
     conn.row_factory = sqlite3.Row
@@ -150,6 +161,8 @@ def init_db() -> None:
         _migrate_sales_table(conn)
         _seed_tax_categories(conn)
         _migrate_products_table(conn)
+        _migrate_employees_table(conn)
+        _migrate_time_entries_table(conn)
         conn.commit()
     finally:
         conn.close()
@@ -168,6 +181,15 @@ def _migrate_sales_table(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE sales ADD COLUMN tax_cents INTEGER NOT NULL DEFAULT 0")
     if "tax_category_name" not in columns:
         conn.execute("ALTER TABLE sales ADD COLUMN tax_category_name TEXT")
+    if "store_id" not in columns:
+        conn.execute("ALTER TABLE sales ADD COLUMN store_id TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            "UPDATE sales SET store_id = ? WHERE store_id IS NULL OR store_id = ''",
+            (get_store_id(),),
+        )
+    if "sold_at_utc" not in columns:
+        # No guessing a timezone for pre-existing rows; leave NULL.
+        conn.execute("ALTER TABLE sales ADD COLUMN sold_at_utc TEXT")
     if needs_backfill or "transaction_id" in columns:
         conn.execute(
             """UPDATE sales
@@ -198,6 +220,32 @@ def _migrate_products_table(conn: sqlite3.Connection) -> None:
         "UPDATE products SET tax_category_id = ? WHERE tax_category_id IS NULL",
         (general_id,),
     )
+    if "store_id" not in columns:
+        conn.execute("ALTER TABLE products ADD COLUMN store_id TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            "UPDATE products SET store_id = ? WHERE store_id IS NULL OR store_id = ''",
+            (get_store_id(),),
+        )
+
+
+def _migrate_employees_table(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(employees)")}
+    if "store_id" not in columns:
+        conn.execute("ALTER TABLE employees ADD COLUMN store_id TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            "UPDATE employees SET store_id = ? WHERE store_id IS NULL OR store_id = ''",
+            (get_store_id(),),
+        )
+
+
+def _migrate_time_entries_table(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(time_entries)")}
+    if "store_id" not in columns:
+        conn.execute("ALTER TABLE time_entries ADD COLUMN store_id TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            "UPDATE time_entries SET store_id = ? WHERE store_id IS NULL OR store_id = ''",
+            (get_store_id(),),
+        )
 
 
 def local_now_iso() -> str:
