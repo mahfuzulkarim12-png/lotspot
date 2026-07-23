@@ -55,9 +55,13 @@ def run_k6(stack, scenario, extra_env=None, timeout=900):
     summary.unlink(missing_ok=True)
 
     # A setup()/teardown() exception still writes a summary but runs no
-    # iterations; surface k6's own error before any metric assertion turns it
-    # into a misleading "barely generated traffic".
-    if "script exception" in proc.stderr or "level=error" in proc.stderr:
+    # iterations; surface that before a metric assertion turns it into a
+    # misleading "barely generated traffic".
+    #
+    # A *threshold* breach also makes k6 exit non-zero and log at error level —
+    # that is a legitimate result, not a harness failure, so it must fall
+    # through to the caller's assertions rather than be reported as a crash.
+    if "script exception" in proc.stderr:
         pytest.fail(
             f"k6 script error during {scenario}:\n{proc.stderr[-2000:]}\n"
             f"stdout tail:\n{proc.stdout[-1500:]}"

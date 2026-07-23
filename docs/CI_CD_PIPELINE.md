@@ -169,7 +169,28 @@ are load-bearing and must not be "tidied away":
 
 ---
 
-## 6. Operational notes verified by the chaos tier
+## 6. Measured capacity
+
+From `deploy/tests/test_load.py` against the container behind the nginx TLS
+proxy on a single worker (Apple Silicon, colima):
+
+| Scenario | Load | Result |
+|---|---|---|
+| Soak | 60 req/s constant, 3 min | ~10,800 requests, **0 errors**, p95 ≈ 9 ms |
+| Spike | ramp to 500 VUs, ~70 s | 127,710 requests at ~1,820 req/s, **0 errors**, p95 ≈ 1.1 s, p99 ≈ 2.0 s |
+
+Read that as: the app does not fail under 500-way concurrency, but it does
+**queue** — latency degrades roughly 100× between realistic load and
+saturation while the error rate stays at zero. For a single store this is
+ample headroom; the number to watch if this ever fronts multiple stores is p95
+under concurrency, not throughput.
+
+The soak threshold (p95 < 1 s) is a real SLO. The spike threshold (p95 < 3 s)
+is a degraded-mode bound for a deliberate saturation test — do not copy it into
+the soak. Error-rate and check thresholds are identical in both and must never
+be relaxed.
+
+## 7. Operational notes verified by the chaos tier
 
 - **`docker kill` does not trigger the restart policy.** Docker treats an
   explicit CLI kill as an operator stop, so `--restart unless-stopped` will not
@@ -184,7 +205,7 @@ are load-bearing and must not be "tidied away":
 
 ---
 
-## 7. Container image & vulnerability policy
+## 8. Container image & vulnerability policy
 
 Build: `docker build -t lotspot-preview:latest .`
 
@@ -208,7 +229,7 @@ moment Debian publishes a `FixedVersion`.
 
 ---
 
-## 8. GitHub Actions
+## 9. GitHub Actions
 
 `.github/workflows/e2e-tests.yml` runs the Playwright suite on push/PR to
 `main`. The backend, frontend, and deploy tiers are **not** wired into CI yet —
