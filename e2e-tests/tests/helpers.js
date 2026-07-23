@@ -43,6 +43,38 @@ async function apiDeleteProduct(token, id) {
   await apiRequest(`/api/products/${id}`, { method: 'DELETE', token });
 }
 
+async function apiListProducts(search) {
+  const { envelope } = await apiRequest(`/api/products?search=${encodeURIComponent(search)}`);
+  if (!envelope.success) throw new Error(`list products failed: ${envelope.error}`);
+  return envelope.data;
+}
+
+async function apiListTaxAccounts(token) {
+  const { envelope } = await apiRequest('/api/tax-accounts', { token });
+  if (!envelope.success) throw new Error(`list tax accounts failed: ${envelope.error}`);
+  return envelope.data;
+}
+
+async function apiDeleteTaxAccount(token, id) {
+  await apiRequest(`/api/tax-accounts/${id}`, { method: 'DELETE', token });
+}
+
+async function apiListTaxCategories(token) {
+  const { envelope } = await apiRequest('/api/tax-categories', { token });
+  if (!envelope.success) throw new Error(`list tax categories failed: ${envelope.error}`);
+  return envelope.data;
+}
+
+async function apiSetTaxCategoryAccounts(token, categoryId, taxAccountIds) {
+  const { envelope } = await apiRequest(`/api/tax-categories/${categoryId}/tax-accounts`, {
+    method: 'PUT',
+    token,
+    body: { tax_account_ids: taxAccountIds },
+  });
+  if (!envelope.success) throw new Error(`set tax category accounts failed: ${envelope.error}`);
+  return envelope.data;
+}
+
 async function apiSalesSummary(token, date) {
   const { envelope } = await apiRequest(`/api/sales/summary?date=${encodeURIComponent(date)}`, { token });
   if (!envelope.success) throw new Error(`summary failed: ${envelope.error}`);
@@ -113,7 +145,12 @@ module.exports = {
   apiLogin,
   apiCreateProduct,
   apiDeleteProduct,
+  apiListProducts,
   apiPosSale,
+  apiListTaxAccounts,
+  apiDeleteTaxAccount,
+  apiListTaxCategories,
+  apiSetTaxCategoryAccounts,
   apiSalesSummary,
   apiSalesHistory,
   todayISO,
