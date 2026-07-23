@@ -1,13 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api/client';
+import { todayISO } from '../lib/date';
 import { formatCents } from '../lib/money';
 import { useSaleEvents } from '../hooks/useSaleEvents';
-
-function todayISO() {
-  const now = new Date();
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-}
 
 export default function SummaryPanel() {
   const [day, setDay] = useState(todayISO);
@@ -72,9 +67,14 @@ export default function SummaryPanel() {
       {summary && (
         <div className="stat-row">
           <div className="stat-tile">
-            <p className="stat-label">Revenue</p>
+            <p className="stat-label">Net revenue</p>
             <p className="stat-value num">{formatCents(summary.total_revenue_cents)}</p>
-            <p className="stat-hint">{day}</p>
+            <p className="stat-hint">{day}, tax excluded</p>
+          </div>
+          <div className="stat-tile">
+            <p className="stat-label">Tax collected</p>
+            <p className="stat-value num">{formatCents(summary.total_tax_cents)}</p>
+            <p className="stat-hint">across all jurisdictions</p>
           </div>
           <div className="stat-tile">
             <p className="stat-label">Items sold</p>
@@ -122,6 +122,7 @@ export default function SummaryPanel() {
               <th className="col-num">Qty</th>
               <th className="col-num">Unit</th>
               <th className="col-num">Total</th>
+              <th className="col-num">Tax</th>
               <th>Source</th>
             </tr>
           </thead>
@@ -134,12 +135,13 @@ export default function SummaryPanel() {
                 <td className="col-num num">{sale.qty}</td>
                 <td className="col-num num">{formatCents(sale.unit_price_cents)}</td>
                 <td className="col-num num">{formatCents(sale.total_cents)}</td>
+                <td className="col-num num">{formatCents(sale.tax_cents)}</td>
                 <td>{sale.source}</td>
               </tr>
             ))}
             {sales !== null && sales.length === 0 && (
               <tr>
-                <td colSpan={7} style={{ textAlign: 'center', color: 'var(--ink-muted)' }}>
+                <td colSpan={8} style={{ textAlign: 'center', color: 'var(--ink-muted)' }}>
                   No sales recorded for {day}.
                 </td>
               </tr>

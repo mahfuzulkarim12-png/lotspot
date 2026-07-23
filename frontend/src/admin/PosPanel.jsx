@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { api } from '../api/client';
+import { todayISO } from '../lib/date';
 import { formatCents } from '../lib/money';
+import { computeCartTax } from '../lib/tax';
 import { filterProducts, findProductBySku, stockStatus } from '../lib/inventory';
 import { playScanTone } from '../lib/scanAudio';
 import {
@@ -10,6 +12,7 @@ import {
   pushScanChar,
   scanBufferCode,
 } from '../lib/scanDetection';
+import { useTaxRates } from '../hooks/useTaxRates';
 
 const PAYMENT_METHODS = [
   { value: 'cash', label: 'Cash' },
@@ -40,6 +43,7 @@ function cartList(cart, products) {
 
 export default function PosPanel() {
   const { products, connected } = useOutletContext();
+  const { taxCategories, taxAccounts } = useTaxRates();
   const [query, setQuery] = useState('');
   const [cart, setCart] = useState({});
   const [paymentMethod, setPaymentMethod] = useState('cash');
@@ -69,6 +73,20 @@ export default function PosPanel() {
   );
   const totalQty = cartLines.reduce((sum, line) => sum + line.qty, 0);
   const totalCents = cartLines.reduce((sum, line) => sum + line.line_total_cents, 0);
+  const cartTax = useMemo(
+    () =>
+      computeCartTax(
+        cartLines.map((line) => ({
+          tax_category_id: line.product.tax_category_id,
+          line_total_cents: line.line_total_cents,
+        })),
+        taxCategories,
+        taxAccounts,
+        todayISO()
+      ),
+    [cartLines, taxCategories, taxAccounts]
+  );
+  const grandTotalCents = totalCents + cartTax.taxCents;
 
   useEffect(() => {
     if (!products) return;
@@ -408,9 +426,17 @@ export default function PosPanel() {
             </label>
 
             <div className="pos-total">
-              <div>
-                <p className="stat-label">Running total</p>
-                <p className="stat-value num">{formatCents(totalCents)}</p>
+              <div className="pos-total-row">
+                <span className="stat-label">Subtotal</span>
+                <span className="num">{formatCents(totalCents)}</span>
+              </div>
+              <div className="pos-total-row">
+                <span className="stat-label">Tax</span>
+                <span className="num">{formatCents(cartTax.taxCents)}</span>
+              </div>
+              <div className="pos-total-row pos-total-row-grand">
+                <span className="stat-label">Total</span>
+                <span className="stat-value num">{formatCents(grandTotalCents)}</span>
               </div>
               <div className="pos-total-meta">
                 <span className="stat-hint">{cartLines.length} line{cartLines.length === 1 ? '' : 's'}</span>
@@ -433,8 +459,18 @@ export default function PosPanel() {
                 Transaction {receipt.transaction_id.slice(0, 8)} by {receipt.cashier} using {receipt.payment_method}.
               </p>
               <p className="pos-receipt-total num">
-                {receipt.item_count} line{receipt.item_count === 1 ? '' : 's'} · {receipt.total_qty} item{receipt.total_qty === 1 ? '' : 's'} · {formatCents(receipt.total_cents)}
+                {receipt.item_count} line{receipt.item_count === 1 ? '' : 's'} · {receipt.total_qty} item{receipt.total_qty === 1 ? '' : 's'} · Subtotal {formatCents(receipt.subtotal_cents)} · Tax {formatCents(receipt.tax_cents)} · Total {formatCents(receipt.grand_total_cents)}
               </p>
+              {receipt.tax_breakdown?.length > 0 && (
+                <div className="pos-receipt-breakdown">
+                  {receipt.tax_breakdown.map((line) => (
+                    <div key={line.tax_account_id} className="pos-receipt-breakdown-row">
+                      <span>{line.tax_account_name}</span>
+                      <span className="num">{formatCents(line.tax_cents)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </aside>

@@ -9,6 +9,7 @@ const TABS = [
   { to: 'history', label: 'History' },
   { to: 'timeclock', label: 'Time clock' },
   { to: 'timeclock-history', label: 'Shift history' },
+  { to: 'tax-settings', label: 'Tax settings' },
 ];
 
 export default function AdminDashboard() {

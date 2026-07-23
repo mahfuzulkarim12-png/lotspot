@@ -77,6 +77,28 @@ export const api = {
       { auth: true }
     ),
 
+  listTaxCategories: () => request('/api/tax-categories', { auth: true }),
+  createTaxCategory: (category) =>
+    request('/api/tax-categories', { method: 'POST', body: category, auth: true }),
+  updateTaxCategory: (id, changes) =>
+    request(`/api/tax-categories/${id}`, { method: 'PUT', body: changes, auth: true }),
+  deleteTaxCategory: (id) =>
+    request(`/api/tax-categories/${id}`, { method: 'DELETE', auth: true }),
+  setTaxCategoryAccounts: (id, taxAccountIds) =>
+    request(`/api/tax-categories/${id}/tax-accounts`, {
+      method: 'PUT',
+      body: { tax_account_ids: taxAccountIds },
+      auth: true,
+    }),
+
+  listTaxAccounts: () => request('/api/tax-accounts', { auth: true }),
+  createTaxAccount: (account) =>
+    request('/api/tax-accounts', { method: 'POST', body: account, auth: true }),
+  updateTaxAccount: (id, changes) =>
+    request(`/api/tax-accounts/${id}`, { method: 'PUT', body: changes, auth: true }),
+  deleteTaxAccount: (id) =>
+    request(`/api/tax-accounts/${id}`, { method: 'DELETE', auth: true }),
+
   listEmployees: () => request('/api/employees', { auth: true }),
   createEmployee: (employee) =>
     request('/api/employees', { method: 'POST', body: employee, auth: true }),

@@ -1,13 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api/client';
+import { todayISO } from '../lib/date';
 import { formatCents } from '../lib/money';
 import { useSaleEvents } from '../hooks/useSaleEvents';
-
-function todayISO() {
-  const now = new Date();
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-}
 
 function shiftISO(days) {
   const date = new Date();
@@ -105,7 +100,8 @@ export default function DailyHistoryPanel() {
           <thead>
             <tr>
               <th>Date</th>
-              <th className="col-num">Revenue</th>
+              <th className="col-num">Net revenue</th>
+              <th className="col-num">Tax collected</th>
               <th className="col-num">Items sold</th>
               <th className="col-num">Transactions</th>
             </tr>
@@ -115,20 +111,21 @@ export default function DailyHistoryPanel() {
               <tr key={day.date}>
                 <td className="num">{day.date}</td>
                 <td className="col-num num">{formatCents(day.total_revenue_cents)}</td>
+                <td className="col-num num">{formatCents(day.total_tax_cents)}</td>
                 <td className="col-num num">{day.total_items_sold}</td>
                 <td className="col-num num">{day.transaction_count}</td>
               </tr>
             ))}
             {history && days.length === 0 && (
               <tr>
-                <td colSpan={4} style={{ textAlign: 'center', color: 'var(--ink-muted)' }}>
+                <td colSpan={5} style={{ textAlign: 'center', color: 'var(--ink-muted)' }}>
                   No sales found for this range.
                 </td>
               </tr>
             )}
             {!history && !error && (
               <tr>
-                <td colSpan={4} style={{ textAlign: 'center', color: 'var(--ink-muted)' }}>
+                <td colSpan={5} style={{ textAlign: 'center', color: 'var(--ink-muted)' }}>
                   Loading history…
                 </td>
               </tr>

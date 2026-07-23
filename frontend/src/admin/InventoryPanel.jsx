@@ -1,11 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { api } from '../api/client';
 import { dollarsToCents, formatCents } from '../lib/money';
 import { stockStatus } from '../lib/inventory';
 
 const BADGE_LABEL = { ok: 'In stock', low: 'Low', out: 'Out' };
-const EMPTY_DRAFT = { sku: '', name: '', qty: '', price: '' };
+const GENERAL_MERCHANDISE_NAME = 'General Merchandise';
+const EMPTY_DRAFT = { sku: '', name: '', qty: '', price: '', taxCategoryId: '' };
 
 function draftErrors(draft) {
   if (!draft.sku.trim()) return 'SKU is required';
@@ -23,6 +24,28 @@ export default function InventoryPanel() {
   const [editDraft, setEditDraft] = useState(EMPTY_DRAFT);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [taxCategories, setTaxCategories] = useState([]);
+
+  useEffect(() => {
+    api.listTaxCategories().then(setTaxCategories).catch(() => {});
+  }, []);
+
+  // Pre-select General Merchandise (or the first category) on the create
+  // form once categories load, without clobbering an in-progress edit.
+  useEffect(() => {
+    if (taxCategories.length === 0) return;
+    setDraft((prev) => {
+      if (prev.taxCategoryId) return prev;
+      const fallback =
+        taxCategories.find((c) => c.name === GENERAL_MERCHANDISE_NAME) ?? taxCategories[0];
+      return fallback ? { ...prev, taxCategoryId: String(fallback.id) } : prev;
+    });
+  }, [taxCategories]);
+
+  const taxCategoryName = useMemo(() => {
+    const byId = new Map(taxCategories.map((c) => [c.id, c.name]));
+    return (id) => byId.get(id) ?? '—';
+  }, [taxCategories]);
 
   const set = (setter) => (field) => (e) =>
     setter((prev) => ({ ...prev, [field]: e.target.value }));
@@ -39,13 +62,15 @@ export default function InventoryPanel() {
     setBusy(true);
     setError(null);
     try {
-      await api.createProduct({
+      const payload = {
         sku: draft.sku.trim(),
         name: draft.name.trim(),
         qty: Number(draft.qty),
         price_cents: dollarsToCents(draft.price),
-      });
-      setDraft(EMPTY_DRAFT); // list updates via SSE
+      };
+      if (draft.taxCategoryId) payload.tax_category_id = Number(draft.taxCategoryId);
+      await api.createProduct(payload);
+      setDraft((prev) => ({ ...EMPTY_DRAFT, taxCategoryId: prev.taxCategoryId })); // list updates via SSE
     } catch (err) {
       setError(err.message);
     } finally {
@@ -60,6 +85,7 @@ export default function InventoryPanel() {
       name: product.name,
       qty: String(product.qty),
       price: (product.price_cents / 100).toFixed(2),
+      taxCategoryId: product.tax_category_id != null ? String(product.tax_category_id) : '',
     });
     setError(null);
   };
@@ -78,6 +104,7 @@ export default function InventoryPanel() {
         name: editDraft.name.trim(),
         qty: Number(editDraft.qty),
         price_cents: dollarsToCents(editDraft.price),
+        tax_category_id: editDraft.taxCategoryId ? Number(editDraft.taxCategoryId) : null,
       });
       setEditingId(null);
     } catch (err) {
@@ -126,6 +153,17 @@ export default function InventoryPanel() {
           <span>Price</span>
           <input className="input inline-input" inputMode="decimal" value={draft.price} onChange={setNew('price')} placeholder="2.50" />
         </label>
+        <label className="field">
+          <span>Tax category</span>
+          <select className="input" value={draft.taxCategoryId} onChange={setNew('taxCategoryId')}>
+            {draft.taxCategoryId === '' && <option value="">Loading…</option>}
+            {taxCategories.map((category) => (
+              <option key={category.id} value={category.id}>
+                {category.name}
+              </option>
+            ))}
+          </select>
+        </label>
         <button className="btn btn-primary" type="submit" disabled={busy}>
           Add product
         </button>
@@ -145,6 +183,7 @@ export default function InventoryPanel() {
               <th>Name</th>
               <th className="col-num">Qty</th>
               <th className="col-num">Price</th>
+              <th>Tax category</th>
               <th>Status</th>
               <th aria-label="Actions" />
             </tr>
@@ -161,6 +200,21 @@ export default function InventoryPanel() {
                       <td><input className="input" value={editDraft.name} onChange={setEdit('name')} aria-label="Name" /></td>
                       <td className="col-num"><input className="input inline-input" inputMode="numeric" value={editDraft.qty} onChange={setEdit('qty')} aria-label="Qty" /></td>
                       <td className="col-num"><input className="input inline-input" inputMode="decimal" value={editDraft.price} onChange={setEdit('price')} aria-label="Price" /></td>
+                      <td>
+                        <select
+                          className="input inline-input"
+                          value={editDraft.taxCategoryId}
+                          onChange={setEdit('taxCategoryId')}
+                          aria-label="Tax category"
+                        >
+                          <option value="">No tax category</option>
+                          {taxCategories.map((category) => (
+                            <option key={category.id} value={category.id}>
+                              {category.name}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
                       <td><span className={`badge badge-${status}`}>{BADGE_LABEL[status]}</span></td>
                       <td>
                         <div className="row-actions">
@@ -175,6 +229,7 @@ export default function InventoryPanel() {
                       <td>{product.name}</td>
                       <td className="col-num num">{product.qty}</td>
                       <td className="col-num num">{formatCents(product.price_cents)}</td>
+                      <td>{taxCategoryName(product.tax_category_id)}</td>
                       <td><span className={`badge badge-${status}`}>{BADGE_LABEL[status]}</span></td>
                       <td>
                         <div className="row-actions">
@@ -189,7 +244,7 @@ export default function InventoryPanel() {
             })}
             {(products ?? []).length === 0 && (
               <tr>
-                <td colSpan={6} style={{ textAlign: 'center', color: 'var(--ink-muted)' }}>
+                <td colSpan={7} style={{ textAlign: 'center', color: 'var(--ink-muted)' }}>
                   No products yet — add the first one above.
                 </td>
               </tr>
