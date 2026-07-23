@@ -13,6 +13,15 @@ from pathlib import Path
 
 DEFAULT_DB_FILENAME = "lotspot.db"
 
+GENERAL_MERCHANDISE_CATEGORY = "General Merchandise"
+FOOD_INGREDIENTS_CATEGORY = "Food & Food Ingredients"
+PREPARED_FOOD_CATEGORY = "Prepared Food"
+TAX_CATEGORY_SEED_NAMES = (
+    GENERAL_MERCHANDISE_CATEGORY,
+    FOOD_INGREDIENTS_CATEGORY,
+    PREPARED_FOOD_CATEGORY,
+)
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS products (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,6 +51,48 @@ CREATE TABLE IF NOT EXISTS sales (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sales_sold_at ON sales (sold_at);
+
+-- Jurisdiction-level tax rates (e.g. a state or a city), each with its own
+-- effective date range so rate changes over time stay auditable.
+CREATE TABLE IF NOT EXISTS tax_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    jurisdiction TEXT,
+    rate_bps INTEGER NOT NULL CHECK (rate_bps >= 0),
+    effective_from TEXT NOT NULL,
+    effective_to TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tax_categories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL
+);
+
+-- Which tax_accounts apply to a given tax_category (e.g. "Prepared Food"
+-- is subject to both the state and city accounts, "Food & Food Ingredients"
+-- may be exempt from the state account).
+CREATE TABLE IF NOT EXISTS tax_category_accounts (
+    tax_category_id INTEGER NOT NULL REFERENCES tax_categories(id) ON DELETE CASCADE,
+    tax_account_id INTEGER NOT NULL REFERENCES tax_accounts(id) ON DELETE CASCADE,
+    PRIMARY KEY (tax_category_id, tax_account_id)
+);
+
+-- Per-jurisdiction tax breakdown for a single sales row, snapshotted at sale
+-- time (same rationale as sales.product_name/sku) so history survives rate
+-- changes and tax_account deletion.
+CREATE TABLE IF NOT EXISTS sale_tax_lines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sale_id INTEGER NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
+    tax_account_id INTEGER REFERENCES tax_accounts(id) ON DELETE SET NULL,
+    tax_account_name TEXT NOT NULL,
+    rate_bps INTEGER NOT NULL,
+    tax_cents INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sale_tax_lines_sale_id ON sale_tax_lines (sale_id);
 
 CREATE TABLE IF NOT EXISTS admin_users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,6 +148,8 @@ def init_db() -> None:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA)
         _migrate_sales_table(conn)
+        _seed_tax_categories(conn)
+        _migrate_products_table(conn)
         conn.commit()
     finally:
         conn.close()
@@ -111,12 +164,40 @@ def _migrate_sales_table(conn: sqlite3.Connection) -> None:
     if "payment_method" not in columns:
         conn.execute("ALTER TABLE sales ADD COLUMN payment_method TEXT")
         needs_backfill = True
+    if "tax_cents" not in columns:
+        conn.execute("ALTER TABLE sales ADD COLUMN tax_cents INTEGER NOT NULL DEFAULT 0")
+    if "tax_category_name" not in columns:
+        conn.execute("ALTER TABLE sales ADD COLUMN tax_category_name TEXT")
     if needs_backfill or "transaction_id" in columns:
         conn.execute(
             """UPDATE sales
                SET transaction_id = COALESCE(transaction_id, printf('legacy-%d', id))
                WHERE transaction_id IS NULL OR transaction_id = ''"""
         )
+
+
+def _seed_tax_categories(conn: sqlite3.Connection) -> None:
+    now = local_now_iso()
+    for name in TAX_CATEGORY_SEED_NAMES:
+        conn.execute(
+            "INSERT OR IGNORE INTO tax_categories (name, created_at) VALUES (?, ?)",
+            (name, now),
+        )
+
+
+def _migrate_products_table(conn: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(products)")}
+    if "tax_category_id" not in columns:
+        # No inline REFERENCES: SQLite's ALTER TABLE ADD COLUMN does not
+        # reliably enforce foreign keys declared this way.
+        conn.execute("ALTER TABLE products ADD COLUMN tax_category_id INTEGER")
+    general_id = conn.execute(
+        "SELECT id FROM tax_categories WHERE name = ?", (GENERAL_MERCHANDISE_CATEGORY,)
+    ).fetchone()["id"]
+    conn.execute(
+        "UPDATE products SET tax_category_id = ? WHERE tax_category_id IS NULL",
+        (general_id,),
+    )
 
 
 def local_now_iso() -> str:
