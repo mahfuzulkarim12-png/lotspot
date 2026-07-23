@@ -22,3 +22,6 @@ frontend/dist/
 # Coverage
 .coverage
 htmlcov/
+
+# Committed-by-mistake virtualenv (untracked 2026-07-23)
+venv/
