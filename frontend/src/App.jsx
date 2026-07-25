@@ -11,6 +11,7 @@ import DailyHistoryPanel from './admin/DailyHistoryPanel';
 import TimeclockPanel from './admin/TimeclockPanel';
 import TimeclockHistoryPanel from './admin/TimeclockHistoryPanel';
 import TaxSettingsPanel from './admin/TaxSettingsPanel';
+import VoidedPanel from './admin/VoidedPanel';
 
 function RequireAuth({ children }) {
   const { status } = useAuth();
@@ -42,6 +43,7 @@ export default function App() {
         <Route path="sale" element={<SalesEntryPanel />} />
         <Route path="summary" element={<SummaryPanel />} />
         <Route path="history" element={<DailyHistoryPanel />} />
+        <Route path="voided" element={<VoidedPanel />} />
         <Route path="timeclock" element={<TimeclockPanel />} />
         <Route path="timeclock-history" element={<TimeclockHistoryPanel />} />
         <Route path="tax-settings" element={<TaxSettingsPanel />} />

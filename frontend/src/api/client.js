@@ -77,6 +77,35 @@ export const api = {
       { auth: true }
     ),
 
+  voidSale: (saleId, reason) =>
+    request(`/api/sales/${saleId}/void`, {
+      method: 'POST',
+      body: { reason: reason ?? null },
+      auth: true,
+    }),
+  voidReceipt: (transactionId, reason) =>
+    request(`/api/sales/transactions/${encodeURIComponent(transactionId)}/void`, {
+      method: 'POST',
+      body: { reason: reason ?? null },
+      auth: true,
+    }),
+  voidedReceipts: ({ start, end, q } = {}) => {
+    const params = new URLSearchParams();
+    if (start) params.set('start', start);
+    if (end) params.set('end', end);
+    if (q) params.set('q', q);
+    const query = params.toString();
+    return request(`/api/sales/voided/receipts${query ? `?${query}` : ''}`, { auth: true });
+  },
+  voidedItems: ({ start, end, q } = {}) => {
+    const params = new URLSearchParams();
+    if (start) params.set('start', start);
+    if (end) params.set('end', end);
+    if (q) params.set('q', q);
+    const query = params.toString();
+    return request(`/api/sales/voided/items${query ? `?${query}` : ''}`, { auth: true });
+  },
+
   listTaxCategories: () => request('/api/tax-categories', { auth: true }),
   createTaxCategory: (category) =>
     request('/api/tax-categories', { method: 'POST', body: category, auth: true }),

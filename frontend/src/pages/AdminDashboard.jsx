@@ -7,6 +7,7 @@ const TABS = [
   { to: 'inventory', label: 'Inventory' },
   { to: 'summary', label: 'Daily summary' },
   { to: 'history', label: 'History' },
+  { to: 'voided', label: 'Voided' },
   { to: 'timeclock', label: 'Time clock' },
   { to: 'timeclock-history', label: 'Shift history' },
   { to: 'tax-settings', label: 'Tax settings' },
