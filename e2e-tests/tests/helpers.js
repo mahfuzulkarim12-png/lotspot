@@ -117,6 +117,36 @@ async function apiPosSale({ sku, qty, unit_price_cents }) {
   return { status: res.status, envelope };
 }
 
+async function apiPosCheckout(token, { items, payment_method }) {
+  const { envelope } = await apiRequest('/api/pos/checkout', {
+    method: 'POST',
+    token,
+    body: { items, payment_method },
+  });
+  if (!envelope.success) throw new Error(`checkout failed: ${envelope.error}`);
+  return envelope.data;
+}
+
+async function apiVoidSale(token, saleId, reason) {
+  const { envelope } = await apiRequest(`/api/sales/${saleId}/void`, {
+    method: 'POST',
+    token,
+    body: { reason },
+  });
+  if (!envelope.success) throw new Error(`void sale failed: ${envelope.error}`);
+  return envelope.data;
+}
+
+async function apiVoidReceipt(token, transactionId, reason) {
+  const { envelope } = await apiRequest(`/api/sales/transactions/${encodeURIComponent(transactionId)}/void`, {
+    method: 'POST',
+    token,
+    body: { reason },
+  });
+  if (!envelope.success) throw new Error(`void receipt failed: ${envelope.error}`);
+  return envelope.data;
+}
+
 // Inventory rows switch their cells to <input> elements while editing, so a
 // `hasText` locator (which matches rendered text, not input values) loses its
 // match the instant "Edit" is clicked. Resolve the row's numeric position
@@ -147,6 +177,9 @@ module.exports = {
   apiDeleteProduct,
   apiListProducts,
   apiPosSale,
+  apiPosCheckout,
+  apiVoidSale,
+  apiVoidReceipt,
   apiListTaxAccounts,
   apiDeleteTaxAccount,
   apiListTaxCategories,
