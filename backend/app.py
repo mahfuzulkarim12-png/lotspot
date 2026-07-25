@@ -40,6 +40,7 @@ from models import (
     TaxCategoryAccountsIn,
     TaxCategoryIn,
     TaxCategoryUpdate,
+    VoidSaleIn,
 )
 
 DATE_PATTERN = r"^\d{4}-\d{2}-\d{2}$"
@@ -161,6 +162,65 @@ def _sales_daily_totals(
     return totals
 
 
+def _validate_optional_range(start: str | None, end: str | None) -> None:
+    if (start is None) != (end is None):
+        raise ApiError(422, "start and end must be provided together")
+    if start and end and date.fromisoformat(end) < date.fromisoformat(start):
+        raise ApiError(422, "end must be on or after start")
+
+
+def _voided_range_clauses(
+    start: str | None, end: str | None, q: str | None
+) -> tuple[list[str], list]:
+    clauses: list[str] = []
+    params: list = []
+    if start and end:
+        clauses.append("substr(sold_at, 1, 10) BETWEEN ? AND ?")
+        params += [start, end]
+    if q:
+        clauses.append("transaction_id LIKE ?")
+        params.append(f"%{q}%")
+    return clauses, params
+
+
+def _group_voided_receipts(rows: list[sqlite3.Row]) -> list[dict]:
+    """Groups fully-voided sales rows (already filtered by the caller's SQL)
+    by transaction_id into receipt summaries, preserving the SQL row order
+    for the first-seen transaction_id (so receipts stay sorted by the
+    query's ORDER BY, typically most recently sold first)."""
+    grouped: dict[str, list[dict]] = {}
+    order: list[str] = []
+    for row in rows:
+        line_item = _public_row(db.row_to_dict(row))
+        transaction_id = line_item["transaction_id"]
+        if transaction_id not in grouped:
+            grouped[transaction_id] = []
+            order.append(transaction_id)
+        grouped[transaction_id].append(line_item)
+
+    receipts = []
+    for transaction_id in order:
+        line_items = grouped[transaction_id]
+        first = line_items[0]
+        subtotal_cents = sum(item["total_cents"] for item in line_items)
+        tax_cents = sum(item["tax_cents"] for item in line_items)
+        receipts.append(
+            {
+                "transaction_id": transaction_id,
+                "sold_at": first["sold_at"],
+                "cashier": first["cashier"],
+                "payment_method": first["payment_method"],
+                "voided_at": max(item["voided_at"] for item in line_items),
+                "subtotal_cents": subtotal_cents,
+                "tax_cents": tax_cents,
+                "grand_total_cents": subtotal_cents + tax_cents,
+                "item_count": len(line_items),
+                "line_items": line_items,
+            }
+        )
+    return receipts
+
+
 def _insert_sale_row(
     conn: sqlite3.Connection,
     product: dict,
@@ -169,6 +229,7 @@ def _insert_sale_row(
     source: str,
     transaction_id: str,
     payment_method: str | None,
+    cashier: str | None = None,
 ) -> dict:
     """Single insert chokepoint for both manual/POS-terminal sales
     (_record_sale) and bulk checkout (_record_checkout). Tax is computed
@@ -186,8 +247,8 @@ def _insert_sale_row(
         """INSERT INTO sales
            (product_id, transaction_id, product_name, sku, qty, unit_price_cents,
             total_cents, tax_cents, tax_category_name, source, payment_method,
-            sold_at, sold_at_utc, store_id, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            cashier, sold_at, sold_at_utc, store_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             product["id"],
             transaction_id,
@@ -200,6 +261,7 @@ def _insert_sale_row(
             tax_category_name,
             source,
             payment_method,
+            cashier,
             now,
             sold_at_utc,
             db.get_store_id(),
@@ -239,6 +301,7 @@ def _record_sale(
     qty: int,
     unit_price_cents: int | None,
     source: str,
+    cashier: str | None = None,
 ) -> dict:
     """Atomically decrement stock and insert the sale row (snapshotting
     name/sku/price so history survives product edits and deletion)."""
@@ -262,6 +325,7 @@ def _record_sale(
         source=source,
         transaction_id=transaction_id,
         payment_method=None,
+        cashier=cashier,
     )
     conn.commit()
 
@@ -276,6 +340,7 @@ def _record_checkout(
     broadcaster: Broadcaster,
     items: list[CheckoutItemIn],
     payment_method: str,
+    cashier: str | None = None,
 ) -> dict:
     transaction_id = uuid.uuid4().hex
     now = db.local_now_iso()
@@ -331,6 +396,7 @@ def _record_checkout(
             source="pos",
             transaction_id=transaction_id,
             payment_method=payment_method,
+            cashier=cashier,
         )
         sales.append(sale)
 
@@ -773,7 +839,7 @@ def create_app() -> FastAPI:
     # -------------------------------------------------------------- sales
 
     @app.post("/api/sales", status_code=201, tags=["sales"])
-    async def create_sale(body: SaleIn, _admin: str = Depends(require_admin)):
+    async def create_sale(body: SaleIn, admin: str = Depends(require_admin)):
         conn = db.connect()
         try:
             product = _fetch_product(conn, body.product_id)
@@ -781,7 +847,7 @@ def create_app() -> FastAPI:
                 raise ApiError(404, f"Product {body.product_id} not found")
             sale = _record_sale(
                 conn, app.state.broadcaster, product, body.qty,
-                body.unit_price_cents, source="manual",
+                body.unit_price_cents, source="manual", cashier=admin,
             )
         finally:
             conn.close()
@@ -792,7 +858,8 @@ def create_app() -> FastAPI:
         conn = db.connect()
         try:
             checkout = _record_checkout(
-                conn, app.state.broadcaster, body.items, body.payment_method
+                conn, app.state.broadcaster, body.items, body.payment_method,
+                cashier=admin,
             )
         finally:
             conn.close()
@@ -875,6 +942,146 @@ def create_app() -> FastAPI:
                 ],
             }
         )
+
+    # ------------------------------------------------------ voided sales
+
+    @app.post("/api/sales/{sale_id}/void", tags=["sales"])
+    async def void_sale(
+        sale_id: int, body: VoidSaleIn, admin: str = Depends(require_admin)
+    ):
+        conn = db.connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM sales WHERE id = ?", (sale_id,)
+            ).fetchone()
+            if row is None:
+                raise ApiError(404, f"Sale {sale_id} not found")
+            if row["voided_at"] is not None:
+                raise ApiError(409, f"Sale {sale_id} is already voided")
+
+            now = db.local_now_iso()
+            conn.execute(
+                """UPDATE sales SET voided_at = ?, voided_by = ?, void_reason = ?
+                   WHERE id = ?""",
+                (now, admin, body.reason, sale_id),
+            )
+            conn.commit()
+            sale = _public_row(
+                db.row_to_dict(
+                    conn.execute(
+                        "SELECT * FROM sales WHERE id = ?", (sale_id,)
+                    ).fetchone()
+                )
+            )
+        finally:
+            conn.close()
+        app.state.broadcaster.publish({"type": "sale", "action": "voided", "sale": sale})
+        return ok(sale)
+
+    @app.post("/api/sales/transactions/{transaction_id}/void", tags=["sales"])
+    async def void_receipt(
+        transaction_id: str, body: VoidSaleIn, admin: str = Depends(require_admin)
+    ):
+        conn = db.connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM sales WHERE transaction_id = ?", (transaction_id,)
+            ).fetchall()
+            if not rows:
+                raise ApiError(404, f"Receipt {transaction_id} not found")
+            if all(row["voided_at"] is not None for row in rows):
+                raise ApiError(409, f"Receipt {transaction_id} is already fully voided")
+
+            now = db.local_now_iso()
+            conn.execute(
+                """UPDATE sales SET voided_at = ?, voided_by = ?, void_reason = ?
+                   WHERE transaction_id = ? AND voided_at IS NULL""",
+                (now, admin, body.reason, transaction_id),
+            )
+            conn.commit()
+            updated_rows = conn.execute(
+                "SELECT * FROM sales WHERE transaction_id = ? ORDER BY id",
+                (transaction_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        line_items = [_public_row(db.row_to_dict(r)) for r in updated_rows]
+        for item in line_items:
+            app.state.broadcaster.publish(
+                {"type": "sale", "action": "voided", "sale": item}
+            )
+        return ok({"transaction_id": transaction_id, "line_items": line_items})
+
+    @app.get("/api/sales/voided/receipts", tags=["sales"])
+    async def list_voided_receipts(
+        _admin: str = Depends(require_admin),
+        start: str | None = Query(default=None, pattern=DATE_PATTERN),
+        end: str | None = Query(default=None, pattern=DATE_PATTERN),
+        q: str | None = Query(default=None, max_length=64, alias="q"),
+    ):
+        """Fully voided receipts: every line item sharing a transaction_id
+        carries voided_at. Partially voided receipts (some items still
+        active) surface via /api/sales/voided/items instead."""
+        _validate_optional_range(start, end)
+        clauses, params = _voided_range_clauses(start, end, q)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+
+        conn = db.connect()
+        try:
+            candidates = conn.execute(
+                f"""SELECT transaction_id FROM sales{where}
+                    GROUP BY transaction_id
+                    HAVING COUNT(*) = SUM(CASE WHEN voided_at IS NOT NULL THEN 1 ELSE 0 END)""",
+                params,
+            ).fetchall()
+            transaction_ids = [row["transaction_id"] for row in candidates]
+            if not transaction_ids:
+                receipts: list[dict] = []
+            else:
+                placeholders = ",".join("?" for _ in transaction_ids)
+                rows = conn.execute(
+                    f"""SELECT * FROM sales WHERE transaction_id IN ({placeholders})
+                        ORDER BY sold_at DESC, transaction_id, id""",
+                    transaction_ids,
+                ).fetchall()
+                receipts = _group_voided_receipts(rows)
+        finally:
+            conn.close()
+        return ok(receipts)
+
+    @app.get("/api/sales/voided/items", tags=["sales"])
+    async def list_voided_items(
+        _admin: str = Depends(require_admin),
+        start: str | None = Query(default=None, pattern=DATE_PATTERN),
+        end: str | None = Query(default=None, pattern=DATE_PATTERN),
+        q: str | None = Query(default=None, max_length=64, alias="q"),
+    ):
+        """Individually voided line items: voided, but at least one sibling
+        line item on the same receipt is still active. A fully voided
+        receipt's line items are reported via /api/sales/voided/receipts,
+        not duplicated here."""
+        _validate_optional_range(start, end)
+        clauses, params = _voided_range_clauses(start, end, q)
+        clauses = [
+            "voided_at IS NOT NULL",
+            """EXISTS (
+                 SELECT 1 FROM sales AS sibling
+                 WHERE sibling.transaction_id = sales.transaction_id
+                   AND sibling.voided_at IS NULL
+               )""",
+            *clauses,
+        ]
+
+        conn = db.connect()
+        try:
+            rows = conn.execute(
+                f"SELECT * FROM sales WHERE {' AND '.join(clauses)} "
+                "ORDER BY voided_at DESC, id DESC",
+                params,
+            ).fetchall()
+        finally:
+            conn.close()
+        return ok([_public_row(db.row_to_dict(r)) for r in rows])
 
     # ------------------------------------------------- POS integration
 

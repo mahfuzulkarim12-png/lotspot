@@ -47,15 +47,27 @@ CREATE TABLE IF NOT EXISTS sales (
     total_cents INTEGER NOT NULL,
     source TEXT NOT NULL DEFAULT 'manual',
     payment_method TEXT,
+    -- admin username who performed the sale/checkout; NULL for sales pushed
+    -- by the external POS terminal via API key (no logged-in operator)
+    cashier TEXT,
     sold_at TEXT NOT NULL,
     -- UTC mirror of sold_at for a future HQ sync; sold_at itself stays
     -- naive-local because day filtering depends on its plain prefix match
     sold_at_utc TEXT,
     store_id TEXT NOT NULL DEFAULT '',
+    -- a line item is voided individually; a receipt (transaction_id) reads
+    -- as fully voided when every one of its line items carries voided_at
+    voided_at TEXT,
+    void_reason TEXT,
+    voided_by TEXT,
     created_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_sales_sold_at ON sales (sold_at);
+-- idx_sales_transaction_id/idx_sales_voided_at are created in
+-- _migrate_sales_table, not here: on an upgrading (non-fresh) database this
+-- script runs before the migration adds those columns, and CREATE INDEX on a
+-- not-yet-existing column raises sqlite3.OperationalError.
 
 -- Jurisdiction-level tax rates (e.g. a state or a city), each with its own
 -- effective date range so rate changes over time stay auditable.
@@ -190,12 +202,25 @@ def _migrate_sales_table(conn: sqlite3.Connection) -> None:
     if "sold_at_utc" not in columns:
         # No guessing a timezone for pre-existing rows; leave NULL.
         conn.execute("ALTER TABLE sales ADD COLUMN sold_at_utc TEXT")
+    if "cashier" not in columns:
+        # No attribution to guess for pre-existing rows; leave NULL.
+        conn.execute("ALTER TABLE sales ADD COLUMN cashier TEXT")
+    if "voided_at" not in columns:
+        conn.execute("ALTER TABLE sales ADD COLUMN voided_at TEXT")
+        conn.execute("ALTER TABLE sales ADD COLUMN void_reason TEXT")
+        conn.execute("ALTER TABLE sales ADD COLUMN voided_by TEXT")
     if needs_backfill or "transaction_id" in columns:
         conn.execute(
             """UPDATE sales
                SET transaction_id = COALESCE(transaction_id, printf('legacy-%d', id))
                WHERE transaction_id IS NULL OR transaction_id = ''"""
         )
+    # Safe here regardless of upgrade path: transaction_id/voided_at are
+    # guaranteed to exist on `sales` by this point in the function.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sales_transaction_id ON sales (transaction_id)"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sales_voided_at ON sales (voided_at)")
 
 
 def _seed_tax_categories(conn: sqlite3.Connection) -> None:

@@ -103,6 +103,64 @@ def _build_pre_store_id_db(path: str) -> None:
         conn.close()
 
 
+# sales as it existed after store_id/sold_at_utc but before cashier and the
+# void-tracking columns were added, with one pre-existing row to backfill.
+PRE_VOID_SCHEMA = """
+CREATE TABLE products (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sku TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    qty INTEGER NOT NULL DEFAULT 0 CHECK (qty >= 0),
+    price_cents INTEGER NOT NULL CHECK (price_cents >= 0),
+    store_id TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE sales (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+    transaction_id TEXT,
+    product_name TEXT NOT NULL,
+    sku TEXT NOT NULL,
+    qty INTEGER NOT NULL CHECK (qty > 0),
+    unit_price_cents INTEGER NOT NULL CHECK (unit_price_cents >= 0),
+    total_cents INTEGER NOT NULL,
+    tax_cents INTEGER NOT NULL DEFAULT 0,
+    tax_category_name TEXT,
+    source TEXT NOT NULL DEFAULT 'manual',
+    payment_method TEXT,
+    sold_at TEXT NOT NULL,
+    sold_at_utc TEXT,
+    store_id TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+"""
+
+
+def _build_pre_void_db(path: str) -> None:
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(PRE_VOID_SCHEMA)
+        conn.execute(
+            """INSERT INTO products
+               (sku, name, qty, price_cents, store_id, created_at, updated_at)
+               VALUES ('PRE-VOID-1', 'Pre Void Widget', 5, 300, 'store-01',
+                       '2026-01-01T00:00:00', '2026-01-01T00:00:00')"""
+        )
+        conn.execute(
+            """INSERT INTO sales
+               (product_id, transaction_id, product_name, sku, qty, unit_price_cents,
+                total_cents, source, sold_at, sold_at_utc, store_id, created_at)
+               VALUES (1, 'pre-void-txn', 'Pre Void Widget', 'PRE-VOID-1', 1, 300, 300,
+                       'manual', '2026-01-01T09:00:00', '2026-01-01T09:00:00+00:00',
+                       'store-01', '2026-01-01T09:00:00')"""
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _build_legacy_db(path: str) -> None:
     """A pre-tax, pre-transaction_id sales table, matching what a real
     early-version LotSpot install would have on disk."""
@@ -256,5 +314,39 @@ def test_store_id_defaults_to_store_01_when_env_unset(tmp_path, monkeypatch):
     try:
         product = conn.execute("SELECT * FROM products WHERE sku = 'PRE-1'").fetchone()
         assert product["store_id"] == "store-01"
+    finally:
+        conn.close()
+
+
+def test_void_columns_migrate_idempotently_with_null_backfill(tmp_path, monkeypatch):
+    db_path = tmp_path / "pre_void.db"
+    _build_pre_void_db(str(db_path))
+    monkeypatch.setenv("LOTSPOT_DB", str(db_path))
+
+    import db
+
+    db.init_db()
+    db.init_db()  # re-running the migration must not raise or duplicate columns
+
+    conn = db.connect()
+    try:
+        columns = [row["name"] for row in conn.execute("PRAGMA table_info(sales)")]
+        assert {"cashier", "voided_at", "void_reason", "voided_by"} <= set(columns)
+        assert len(columns) == len(set(columns)), "duplicate columns on sales"
+
+        sale = conn.execute("SELECT * FROM sales WHERE sku = 'PRE-VOID-1'").fetchone()
+        # No cashier/void state can be inferred for pre-existing rows; all
+        # four new columns must backfill to NULL, never a guessed value.
+        assert sale["cashier"] is None
+        assert sale["voided_at"] is None
+        assert sale["void_reason"] is None
+        assert sale["voided_by"] is None
+
+        indexes = {
+            row["name"]
+            for row in conn.execute("PRAGMA index_list(sales)")
+        }
+        assert "idx_sales_transaction_id" in indexes
+        assert "idx_sales_voided_at" in indexes
     finally:
         conn.close()

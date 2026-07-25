@@ -85,6 +85,13 @@ class PosCheckoutIn(BaseModel):
     payment_method: str = Field(min_length=1, max_length=PAYMENT_METHOD_MAX)
 
 
+VOID_REASON_MAX = 200
+
+
+class VoidSaleIn(BaseModel):
+    reason: str | None = Field(default=None, max_length=VOID_REASON_MAX)
+
+
 class EmployeeIn(BaseModel):
     name: str = Field(min_length=1, max_length=NAME_MAX)
     pin: str = Field(min_length=PIN_MIN, max_length=PIN_MAX, pattern=r"^\d+$")
