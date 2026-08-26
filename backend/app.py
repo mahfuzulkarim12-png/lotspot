@@ -50,10 +50,21 @@ TOP_ITEMS_LIMIT = 5
 # store_id/sold_at_utc exist only for a future HQ multi-store sync; they must
 # never reach an API response, an SSE broadcast, or the frontend.
 _INTERNAL_ONLY_FIELDS = ("store_id", "sold_at_utc")
+_SENSITIVE_BROADCAST_FIELDS = ("cashier", "voided_by", "void_reason")
 
 
 def _public_row(row: dict) -> dict:
     return {k: v for k, v in row.items() if k not in _INTERNAL_ONLY_FIELDS}
+
+
+def _broadcast_row(row: dict) -> dict:
+    """Remove fields from row that are sensitive (admin-only) and should not be
+    broadcast via public SSE. Removes both internal fields and admin-sensitive fields."""
+    return {
+        k: v
+        for k, v in row.items()
+        if k not in _INTERNAL_ONLY_FIELDS and k not in _SENSITIVE_BROADCAST_FIELDS
+    }
 
 
 class ApiError(Exception):
@@ -79,6 +90,18 @@ def require_admin(request: Request) -> str:
     if not header.lower().startswith("bearer "):
         raise ApiError(401, "Missing bearer token")
     username = request.app.state.tokens.validate(header[7:].strip())
+    if username is None:
+        raise ApiError(401, "Invalid or expired token")
+    return username
+
+
+def _require_admin_from_token(token: str, app) -> str:
+    """Validate a bearer token string and return the admin username.
+    Used for query-parameter-based auth (e.g., SSE endpoints where headers
+    cannot be sent by EventSource API)."""
+    if not token:
+        raise ApiError(401, "Missing bearer token")
+    username = app.state.tokens.validate(token)
     if username is None:
         raise ApiError(401, "Invalid or expired token")
     return username
@@ -331,7 +354,7 @@ def _record_sale(
 
     updated = _fetch_product(conn, product["id"])
     broadcaster.publish({"type": "inventory", "action": "updated", "product": updated})
-    broadcaster.publish({"type": "sale", "action": "created", "sale": sale})
+    broadcaster.publish({"type": "sale", "action": "created", "sale": _broadcast_row(sale)})
     return sale
 
 
@@ -408,7 +431,7 @@ def _record_checkout(
         refreshed_products.append(updated)
         broadcaster.publish({"type": "inventory", "action": "updated", "product": updated})
     for sale in sales:
-        broadcaster.publish({"type": "sale", "action": "created", "sale": sale})
+        broadcaster.publish({"type": "sale", "action": "created", "sale": _broadcast_row(sale)})
 
     total_qty = sum(item["qty"] for item in sales)
     subtotal_cents = sum(item["total_cents"] for item in sales)
@@ -975,7 +998,7 @@ def create_app() -> FastAPI:
             )
         finally:
             conn.close()
-        app.state.broadcaster.publish({"type": "sale", "action": "voided", "sale": sale})
+        app.state.broadcaster.publish({"type": "sale", "action": "voided", "sale": _broadcast_row(sale)})
         return ok(sale)
 
     @app.post("/api/sales/transactions/{transaction_id}/void", tags=["sales"])
@@ -1008,7 +1031,7 @@ def create_app() -> FastAPI:
         line_items = [_public_row(db.row_to_dict(r)) for r in updated_rows]
         for item in line_items:
             app.state.broadcaster.publish(
-                {"type": "sale", "action": "voided", "sale": item}
+                {"type": "sale", "action": "voided", "sale": _broadcast_row(item)}
             )
         return ok({"transaction_id": transaction_id, "line_items": line_items})
 
@@ -1294,7 +1317,8 @@ def create_app() -> FastAPI:
     # ---------------------------------------------------------- real-time
 
     @app.get("/api/events", tags=["system"])
-    async def events():
+    async def events(token: str | None = Query(default=None)):
+        _require_admin_from_token(token, app)
         broadcaster: Broadcaster = app.state.broadcaster
         heartbeat = float(
             os.environ.get("LOTSPOT_SSE_HEARTBEAT", DEFAULT_SSE_HEARTBEAT_SECONDS)

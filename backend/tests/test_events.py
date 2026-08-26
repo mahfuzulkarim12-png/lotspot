@@ -52,14 +52,17 @@ def test_broadcaster_drops_events_for_stalled_subscriber():
 def test_sse_endpoint_wire_format_and_cleanup(tmp_path, monkeypatch):
     monkeypatch.setenv("LOTSPOT_DB", str(tmp_path / "sse.db"))
     monkeypatch.setenv("LOTSPOT_ADMIN_PASSWORD", "testpass123")
+    monkeypatch.setenv("LOTSPOT_ADMIN_USER", "admin")
 
     from app import create_app
+    from auth import TokenStore
 
     app = create_app()
+    token = app.state.tokens.create("admin")["token"]
     route = next(r for r in app.routes if getattr(r, "path", None) == "/api/events")
 
     async def scenario():
-        response = await route.endpoint()
+        response = await route.endpoint(token=token)
         assert response.media_type == "text/event-stream"
         chunks = response.body_iterator
 
@@ -87,15 +90,17 @@ def test_sse_emits_keepalive_after_heartbeat_timeout(tmp_path, monkeypatch):
     default."""
     monkeypatch.setenv("LOTSPOT_DB", str(tmp_path / "sse-heartbeat.db"))
     monkeypatch.setenv("LOTSPOT_ADMIN_PASSWORD", "testpass123")
+    monkeypatch.setenv("LOTSPOT_ADMIN_USER", "admin")
     monkeypatch.setenv("LOTSPOT_SSE_HEARTBEAT", "0.05")
 
     from app import create_app
 
     app = create_app()
+    token = app.state.tokens.create("admin")["token"]
     route = next(r for r in app.routes if getattr(r, "path", None) == "/api/events")
 
     async def scenario():
-        response = await route.endpoint()
+        response = await route.endpoint(token=token)
         chunks = response.body_iterator
 
         first = await asyncio.wait_for(anext(chunks), timeout=1)
@@ -208,3 +213,81 @@ def test_product_delete_publishes_deleted_event(client, admin_headers, sample_pr
         "action": "deleted",
         "product_id": sample_product["id"],
     }
+
+
+def test_sse_endpoint_requires_auth(client):
+    """GET /api/events without a token must return 401."""
+    resp = client.get("/api/events")
+    assert resp.status_code == 401
+    assert "Missing bearer token" in resp.text or "401" in resp.text
+
+
+def test_sse_endpoint_rejects_invalid_token(client):
+    """GET /api/events with an invalid token must return 401."""
+    resp = client.get("/api/events?token=invalid-token-12345")
+    assert resp.status_code == 401
+
+
+def test_sse_does_not_broadcast_sensitive_sale_fields(client, admin_headers, sample_product):
+    """Sale broadcasts must NOT include cashier, void_reason, or voided_by fields."""
+    token = admin_headers["Authorization"].split(" ")[1]
+    queue = client.app.state.broadcaster.subscribe()
+
+    resp = client.post(
+        "/api/sales",
+        json={"product_id": sample_product["id"], "qty": 1},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 201
+
+    events = _drain(queue)
+    sale_events = [e for e in events if e["type"] == "sale"]
+    assert len(sale_events) >= 1
+
+    for event in sale_events:
+        sale = event.get("sale", {})
+        assert "cashier" not in sale, "Sensitive field 'cashier' must not be in SSE broadcasts"
+        assert "void_reason" not in sale
+        assert "voided_by" not in sale
+
+
+def test_sse_does_not_broadcast_void_reason_on_void(client, admin_headers, sample_product):
+    """When a sale is voided, the void_reason must NOT be in the SSE broadcast."""
+    coke = client.post(
+        "/api/products",
+        json={"sku": "SSE-VOID-COKE", "name": "SSE Void Coke", "qty": 10, "price_cents": 250},
+        headers=admin_headers,
+    ).json()["data"]
+
+    checkout = client.post(
+        "/api/pos/checkout",
+        json={
+            "payment_method": "cash",
+            "items": [{"product_id": coke["id"], "qty": 1}],
+        },
+        headers=admin_headers,
+    ).json()["data"]
+
+    sale_id = checkout["line_items"][0]["id"]
+    queue = client.app.state.broadcaster.subscribe()
+
+    resp = client.post(
+        f"/api/sales/{sale_id}/void",
+        json={"reason": "Customer returned item"},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 200
+    rest_response = resp.json()["data"]
+
+    assert rest_response["void_reason"] == "Customer returned item"
+    assert rest_response["voided_by"] == "admin"
+
+    events = _drain(queue)
+    void_events = [e for e in events if e.get("action") == "voided"]
+    assert len(void_events) >= 1
+
+    for event in void_events:
+        sale = event.get("sale", {})
+        assert "void_reason" not in sale, "void_reason must not be in SSE broadcast"
+        assert "voided_by" not in sale, "voided_by must not be in SSE broadcast"
+        assert sale.get("id") == sale_id
