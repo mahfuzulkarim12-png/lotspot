@@ -833,21 +833,22 @@ def create_app() -> FastAPI:
             ).fetchone()
             if existing is None:
                 raise ApiError(404, f"Tax category {tax_category_id} not found")
-            if body.tax_account_ids:
-                placeholders = ",".join("?" for _ in body.tax_account_ids)
+            deduped_ids = list(dict.fromkeys(body.tax_account_ids))
+            if deduped_ids:
+                placeholders = ",".join("?" for _ in deduped_ids)
                 found = conn.execute(
                     f"SELECT id FROM tax_accounts WHERE id IN ({placeholders})",
-                    body.tax_account_ids,
+                    deduped_ids,
                 ).fetchall()
                 found_ids = {row["id"] for row in found}
-                missing = [i for i in body.tax_account_ids if i not in found_ids]
+                missing = [i for i in deduped_ids if i not in found_ids]
                 if missing:
                     raise ApiError(404, f"Tax account {missing[0]} not found")
             conn.execute(
                 "DELETE FROM tax_category_accounts WHERE tax_category_id = ?",
                 (tax_category_id,),
             )
-            for account_id in body.tax_account_ids:
+            for account_id in deduped_ids:
                 conn.execute(
                     """INSERT INTO tax_category_accounts (tax_category_id, tax_account_id)
                        VALUES (?, ?)""",
