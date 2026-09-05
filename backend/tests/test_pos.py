@@ -280,6 +280,20 @@ def test_pos_checkout_receipt_includes_tax_breakdown(client, admin_headers):
     }
 
 
+def test_pos_checkout_rejects_unrecognized_payment_method(
+    client, admin_headers, sample_product
+):
+    resp = client.post(
+        "/api/pos/checkout",
+        json={
+            "payment_method": "bitcoin",
+            "items": [{"product_id": sample_product["id"], "qty": 1}],
+        },
+        headers=admin_headers,
+    )
+    assert resp.status_code == 422
+
+
 def test_pos_checkout_insufficient_stock_rolls_back(client, admin_headers, sample_product):
     resp = client.post(
         "/api/pos/checkout",

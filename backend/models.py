@@ -1,11 +1,12 @@
 """Pydantic request models. All money values are integer cents."""
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 SKU_MAX = 64
 NAME_MAX = 200
 SOURCE_MAX = 32
-PAYMENT_METHOD_MAX = 32
 PIN_MIN = 4
 PIN_MAX = 8
 DATE_PATTERN = r"^\d{4}-\d{2}-\d{2}$"
@@ -82,7 +83,7 @@ class CheckoutItemIn(BaseModel):
 
 class PosCheckoutIn(BaseModel):
     items: list[CheckoutItemIn] = Field(min_length=1)
-    payment_method: str = Field(min_length=1, max_length=PAYMENT_METHOD_MAX)
+    payment_method: Literal["cash", "card"]
 
 
 VOID_REASON_MAX = 200
