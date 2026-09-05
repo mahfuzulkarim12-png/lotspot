@@ -510,9 +510,18 @@ def create_app() -> FastAPI:
             row = conn.execute(
                 "SELECT * FROM admin_users WHERE username = ?", (body.username,)
             ).fetchone()
+            valid = row is not None and verify_password(body.password, row["password_hash"])
+            db.record_audit(
+                conn,
+                body.username,
+                "auth.login_success" if valid else "auth.login_failure",
+                "auth",
+                body.username,
+            )
+            conn.commit()
         finally:
             conn.close()
-        if row is None or not verify_password(body.password, row["password_hash"]):
+        if not valid:
             raise ApiError(401, "Invalid username or password")
         session = app.state.tokens.create(body.username)
         return ok({"username": body.username, **session})
@@ -553,7 +562,7 @@ def create_app() -> FastAPI:
         return ok([_public_row(db.row_to_dict(r)) for r in rows])
 
     @app.post("/api/products", status_code=201, tags=["products"])
-    async def create_product(body: ProductIn, _admin: str = Depends(require_admin)):
+    async def create_product(body: ProductIn, admin: str = Depends(require_admin)):
         now = db.local_now_iso()
         conn = db.connect()
         try:
@@ -578,6 +587,7 @@ def create_app() -> FastAPI:
                         now,
                     ),
                 )
+                db.record_audit(conn, admin, "product.create", "product", cur.lastrowid)
                 conn.commit()
             except sqlite3.IntegrityError:
                 raise ApiError(409, f"A product with SKU {body.sku!r} already exists")
@@ -591,7 +601,7 @@ def create_app() -> FastAPI:
 
     @app.put("/api/products/{product_id}", tags=["products"])
     async def update_product(
-        product_id: int, body: ProductUpdate, _admin: str = Depends(require_admin)
+        product_id: int, body: ProductUpdate, admin: str = Depends(require_admin)
     ):
         changes = body.model_dump(exclude_unset=True)
         conn = db.connect()
@@ -610,6 +620,7 @@ def create_app() -> FastAPI:
                         f"UPDATE products SET {assignments}, updated_at = ? WHERE id = ?",
                         (*changes.values(), db.local_now_iso(), product_id),
                     )
+                    db.record_audit(conn, admin, "product.update", "product", product_id)
                     conn.commit()
                 except sqlite3.IntegrityError:
                     raise ApiError(
@@ -624,12 +635,13 @@ def create_app() -> FastAPI:
         return ok(product)
 
     @app.delete("/api/products/{product_id}", tags=["products"])
-    async def delete_product(product_id: int, _admin: str = Depends(require_admin)):
+    async def delete_product(product_id: int, admin: str = Depends(require_admin)):
         conn = db.connect()
         try:
             if _fetch_product(conn, product_id) is None:
                 raise ApiError(404, f"Product {product_id} not found")
             conn.execute("DELETE FROM products WHERE id = ?", (product_id,))
+            db.record_audit(conn, admin, "product.delete", "product", product_id)
             conn.commit()
         finally:
             conn.close()
@@ -652,7 +664,7 @@ def create_app() -> FastAPI:
         return ok([db.row_to_dict(r) for r in rows])
 
     @app.post("/api/tax-accounts", status_code=201, tags=["tax"])
-    async def create_tax_account(body: TaxAccountIn, _admin: str = Depends(require_admin)):
+    async def create_tax_account(body: TaxAccountIn, admin: str = Depends(require_admin)):
         if body.effective_to is not None and body.effective_to < body.effective_from:
             raise ApiError(422, "effective_to must be on or after effective_from")
         now = db.local_now_iso()
@@ -671,6 +683,7 @@ def create_app() -> FastAPI:
                     now,
                 ),
             )
+            db.record_audit(conn, admin, "tax_account.create", "tax_account", cur.lastrowid)
             conn.commit()
             account = db.row_to_dict(
                 conn.execute(
@@ -683,7 +696,7 @@ def create_app() -> FastAPI:
 
     @app.put("/api/tax-accounts/{tax_account_id}", tags=["tax"])
     async def update_tax_account(
-        tax_account_id: int, body: TaxAccountUpdate, _admin: str = Depends(require_admin)
+        tax_account_id: int, body: TaxAccountUpdate, admin: str = Depends(require_admin)
     ):
         changes = body.model_dump(exclude_unset=True)
         conn = db.connect()
@@ -702,6 +715,7 @@ def create_app() -> FastAPI:
                     f"UPDATE tax_accounts SET {assignments} WHERE id = ?",
                     (*changes.values(), tax_account_id),
                 )
+                db.record_audit(conn, admin, "tax_account.update", "tax_account", tax_account_id)
                 conn.commit()
             account = db.row_to_dict(
                 conn.execute(
@@ -713,7 +727,7 @@ def create_app() -> FastAPI:
         return ok(account)
 
     @app.delete("/api/tax-accounts/{tax_account_id}", tags=["tax"])
-    async def delete_tax_account(tax_account_id: int, _admin: str = Depends(require_admin)):
+    async def delete_tax_account(tax_account_id: int, admin: str = Depends(require_admin)):
         conn = db.connect()
         try:
             existing = conn.execute(
@@ -722,6 +736,7 @@ def create_app() -> FastAPI:
             if existing is None:
                 raise ApiError(404, f"Tax account {tax_account_id} not found")
             conn.execute("DELETE FROM tax_accounts WHERE id = ?", (tax_account_id,))
+            db.record_audit(conn, admin, "tax_account.delete", "tax_account", tax_account_id)
             conn.commit()
         finally:
             conn.close()
@@ -753,7 +768,7 @@ def create_app() -> FastAPI:
         return ok(categories)
 
     @app.post("/api/tax-categories", status_code=201, tags=["tax"])
-    async def create_tax_category(body: TaxCategoryIn, _admin: str = Depends(require_admin)):
+    async def create_tax_category(body: TaxCategoryIn, admin: str = Depends(require_admin)):
         now = db.local_now_iso()
         conn = db.connect()
         try:
@@ -761,6 +776,9 @@ def create_app() -> FastAPI:
                 cur = conn.execute(
                     "INSERT INTO tax_categories (name, created_at) VALUES (?, ?)",
                     (body.name, now),
+                )
+                db.record_audit(
+                    conn, admin, "tax_category.create", "tax_category", cur.lastrowid
                 )
                 conn.commit()
             except sqlite3.IntegrityError:
@@ -772,7 +790,7 @@ def create_app() -> FastAPI:
 
     @app.put("/api/tax-categories/{tax_category_id}", tags=["tax"])
     async def update_tax_category(
-        tax_category_id: int, body: TaxCategoryUpdate, _admin: str = Depends(require_admin)
+        tax_category_id: int, body: TaxCategoryUpdate, admin: str = Depends(require_admin)
     ):
         changes = body.model_dump(exclude_unset=True)
         conn = db.connect()
@@ -788,6 +806,9 @@ def create_app() -> FastAPI:
                         "UPDATE tax_categories SET name = ? WHERE id = ?",
                         (changes["name"], tax_category_id),
                     )
+                    db.record_audit(
+                        conn, admin, "tax_category.update", "tax_category", tax_category_id
+                    )
                     conn.commit()
                 except sqlite3.IntegrityError:
                     raise ApiError(
@@ -799,7 +820,7 @@ def create_app() -> FastAPI:
         return ok(category)
 
     @app.delete("/api/tax-categories/{tax_category_id}", tags=["tax"])
-    async def delete_tax_category(tax_category_id: int, _admin: str = Depends(require_admin)):
+    async def delete_tax_category(tax_category_id: int, admin: str = Depends(require_admin)):
         conn = db.connect()
         try:
             existing = conn.execute(
@@ -815,6 +836,9 @@ def create_app() -> FastAPI:
                     409, f"Tax category {tax_category_id} is assigned to {in_use} product(s)"
                 )
             conn.execute("DELETE FROM tax_categories WHERE id = ?", (tax_category_id,))
+            db.record_audit(
+                conn, admin, "tax_category.delete", "tax_category", tax_category_id
+            )
             conn.commit()
         finally:
             conn.close()
@@ -824,7 +848,7 @@ def create_app() -> FastAPI:
     async def set_tax_category_accounts(
         tax_category_id: int,
         body: TaxCategoryAccountsIn,
-        _admin: str = Depends(require_admin),
+        admin: str = Depends(require_admin),
     ):
         conn = db.connect()
         try:
@@ -854,6 +878,9 @@ def create_app() -> FastAPI:
                        VALUES (?, ?)""",
                     (tax_category_id, account_id),
                 )
+            db.record_audit(
+                conn, admin, "tax_category.set_accounts", "tax_category", tax_category_id
+            )
             conn.commit()
             category = _tax_category_with_accounts(conn, tax_category_id)
         finally:
@@ -989,6 +1016,7 @@ def create_app() -> FastAPI:
                    WHERE id = ?""",
                 (now, admin, body.reason, sale_id),
             )
+            db.record_audit(conn, admin, "sale.void", "sale", sale_id)
             conn.commit()
             sale = _public_row(
                 db.row_to_dict(
@@ -1022,6 +1050,7 @@ def create_app() -> FastAPI:
                    WHERE transaction_id = ? AND voided_at IS NULL""",
                 (now, admin, body.reason, transaction_id),
             )
+            db.record_audit(conn, admin, "receipt.void", "receipt", transaction_id)
             conn.commit()
             updated_rows = conn.execute(
                 "SELECT * FROM sales WHERE transaction_id = ? ORDER BY id",
@@ -1138,7 +1167,7 @@ def create_app() -> FastAPI:
     # ----------------------------------------------------------- employees
 
     @app.post("/api/employees", status_code=201, tags=["timeclock"])
-    async def create_employee(body: EmployeeIn, _admin: str = Depends(require_admin)):
+    async def create_employee(body: EmployeeIn, admin: str = Depends(require_admin)):
         now = db.local_now_iso()
         conn = db.connect()
         try:
@@ -1146,6 +1175,7 @@ def create_app() -> FastAPI:
                 "INSERT INTO employees (name, pin_hash, store_id, created_at) VALUES (?, ?, ?, ?)",
                 (body.name, hash_password(body.pin), db.get_store_id(), now),
             )
+            db.record_audit(conn, admin, "employee.create", "employee", cur.lastrowid)
             conn.commit()
             employee = _fetch_employee(conn, cur.lastrowid)
         finally:
