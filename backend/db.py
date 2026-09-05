@@ -22,6 +22,14 @@ TAX_CATEGORY_SEED_NAMES = (
     PREPARED_FOOD_CATEGORY,
 )
 
+# (code, name, type) — seeded idempotently by _seed_ledger_accounts.
+LEDGER_ACCOUNT_SEED = (
+    ("cash_on_hand", "Cash on Hand", "asset"),
+    ("card_clearing", "Card Clearing", "asset"),
+    ("sales_revenue", "Sales Revenue", "revenue"),
+    ("tax_payable", "Tax Payable", "liability"),
+)
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS products (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -161,6 +169,103 @@ CREATE TABLE IF NOT EXISTS audit_log (
 
 CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log (created_at);
 CREATE INDEX IF NOT EXISTS idx_audit_log_actor ON audit_log (actor);
+
+-- Chart of accounts for the double-entry ledger. Seeded idempotently by
+-- _seed_ledger_accounts with the four accounts LotSpot currently needs.
+CREATE TABLE IF NOT EXISTS ledger_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    type TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+-- Append-only double-entry journal. App code must only ever INSERT here
+-- (via post_journal); there is intentionally no UPDATE/DELETE path.
+CREATE TABLE IF NOT EXISTS journal_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    transaction_id TEXT NOT NULL,
+    memo TEXT,
+    store_id TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_journal_entries_transaction_id
+    ON journal_entries (transaction_id);
+
+CREATE TABLE IF NOT EXISTS journal_lines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    journal_entry_id INTEGER NOT NULL REFERENCES journal_entries(id),
+    account_code TEXT NOT NULL REFERENCES ledger_accounts(code),
+    debit_cents INTEGER NOT NULL DEFAULT 0 CHECK (debit_cents >= 0),
+    credit_cents INTEGER NOT NULL DEFAULT 0 CHECK (credit_cents >= 0),
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_journal_lines_journal_entry_id
+    ON journal_lines (journal_entry_id);
+
+CREATE TABLE IF NOT EXISTS cash_drawers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    store_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,
+    opening_float_cents INTEGER NOT NULL,
+    opened_at TEXT NOT NULL,
+    opened_by TEXT,
+    closed_at TEXT,
+    closed_by TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cash_movements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    drawer_id INTEGER NOT NULL REFERENCES cash_drawers(id),
+    transaction_id TEXT,
+    kind TEXT NOT NULL,
+    amount_cents INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cash_movements_drawer_id ON cash_movements (drawer_id);
+
+CREATE TABLE IF NOT EXISTS payments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    transaction_id TEXT NOT NULL,
+    tender_type TEXT NOT NULL CHECK (tender_type IN ('cash', 'card')),
+    amount_cents INTEGER NOT NULL,
+    processor_ref TEXT,
+    auth_code TEXT,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_payments_transaction_id ON payments (transaction_id);
+
+-- Append-only audit trail of quantity changes, independent of products.qty
+-- itself (which stays the current-value source of truth).
+CREATE TABLE IF NOT EXISTS stock_movements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    transaction_id TEXT,
+    delta_qty INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_stock_movements_product_id ON stock_movements (product_id);
+
+-- Records one response per (store_id, key) so a retried POS request replays
+-- the original response instead of double-posting.
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    store_id TEXT NOT NULL DEFAULT '',
+    key TEXT NOT NULL,
+    transaction_id TEXT,
+    response_json TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE (store_id, key)
+);
 """
 
 
@@ -191,6 +296,7 @@ def init_db() -> None:
         _migrate_products_table(conn)
         _migrate_employees_table(conn)
         _migrate_time_entries_table(conn)
+        _seed_ledger_accounts(conn)
         conn.commit()
     finally:
         conn.close()
@@ -287,6 +393,92 @@ def _migrate_time_entries_table(conn: sqlite3.Connection) -> None:
             "UPDATE time_entries SET store_id = ? WHERE store_id IS NULL OR store_id = ''",
             (get_store_id(),),
         )
+
+
+def _seed_ledger_accounts(conn: sqlite3.Connection) -> None:
+    now = local_now_iso()
+    for code, name, account_type in LEDGER_ACCOUNT_SEED:
+        conn.execute(
+            "INSERT OR IGNORE INTO ledger_accounts (code, name, type, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (code, name, account_type, now),
+        )
+
+
+def post_journal(
+    conn: sqlite3.Connection,
+    transaction_id: str,
+    lines: list[dict],
+    memo: str | None = None,
+) -> int:
+    """Insert one balanced double-entry journal_entries row plus its
+    journal_lines. Raises ValueError (writing zero rows) if debits and
+    credits are not equal, or if any line does not set exactly one of
+    debit_cents/credit_cents. Caller owns the transaction: this does not
+    commit."""
+    total_debits = 0
+    total_credits = 0
+    for line in lines:
+        debit_cents = line.get("debit_cents", 0)
+        credit_cents = line.get("credit_cents", 0)
+        has_debit = debit_cents not in (0, None)
+        has_credit = credit_cents not in (0, None)
+        if has_debit == has_credit:
+            raise ValueError(
+                "each journal line must set exactly one of debit_cents/credit_cents"
+            )
+        total_debits += debit_cents or 0
+        total_credits += credit_cents or 0
+    if total_debits != total_credits:
+        raise ValueError(
+            f"unbalanced journal entry: debits={total_debits} credits={total_credits}"
+        )
+
+    now = local_now_iso()
+    cursor = conn.execute(
+        """INSERT INTO journal_entries
+           (transaction_id, memo, store_id, created_at, created_at_utc)
+           VALUES (?, ?, ?, ?, ?)""",
+        (
+            transaction_id,
+            memo,
+            get_store_id(),
+            now,
+            datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        ),
+    )
+    journal_entry_id = cursor.lastrowid
+    for line in lines:
+        conn.execute(
+            """INSERT INTO journal_lines
+               (journal_entry_id, account_code, debit_cents, credit_cents, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                journal_entry_id,
+                line["account_code"],
+                line.get("debit_cents", 0) or 0,
+                line.get("credit_cents", 0) or 0,
+                now,
+            ),
+        )
+    return journal_entry_id
+
+
+def record_stock_movement(
+    conn: sqlite3.Connection,
+    product_id: int,
+    transaction_id: str | None,
+    delta_qty: int,
+    reason: str,
+) -> None:
+    """Append one row to stock_movements. Caller commits as part of its own
+    transaction so the movement is atomic with the qty change it records."""
+    conn.execute(
+        """INSERT INTO stock_movements
+           (product_id, transaction_id, delta_qty, reason, created_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        (product_id, transaction_id, delta_qty, reason, local_now_iso()),
+    )
 
 
 def record_audit(
