@@ -8,7 +8,7 @@ day filtering is a plain prefix match with no timezone conversion surprises.
 
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 DEFAULT_DB_FILENAME = "lotspot.db"
@@ -145,6 +145,22 @@ CREATE INDEX IF NOT EXISTS idx_time_entries_clock_in_at ON time_entries (clock_i
 -- this index makes "one open shift per employee" a hard DB-level guarantee.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_time_entries_one_open_shift
     ON time_entries (employee_id) WHERE clock_out_at IS NULL;
+
+-- Append-only record of privileged actions (PCI Req 10). App code must only
+-- ever INSERT here; there is intentionally no UPDATE/DELETE path.
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT,
+    store_id TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log (created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_log_actor ON audit_log (actor);
 """
 
 
@@ -271,6 +287,32 @@ def _migrate_time_entries_table(conn: sqlite3.Connection) -> None:
             "UPDATE time_entries SET store_id = ? WHERE store_id IS NULL OR store_id = ''",
             (get_store_id(),),
         )
+
+
+def record_audit(
+    conn: sqlite3.Connection,
+    actor: str,
+    action: str,
+    entity_type: str,
+    entity_id: str | int | None,
+    store_id: str | None = None,
+) -> None:
+    """Append one row to audit_log. Caller commits as part of its own
+    transaction so the audit row is atomic with the mutation it records."""
+    conn.execute(
+        """INSERT INTO audit_log
+           (actor, action, entity_type, entity_id, store_id, created_at, created_at_utc)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (
+            actor,
+            action,
+            entity_type,
+            str(entity_id) if entity_id is not None else None,
+            store_id or get_store_id(),
+            local_now_iso(),
+            datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        ),
+    )
 
 
 def local_now_iso() -> str:

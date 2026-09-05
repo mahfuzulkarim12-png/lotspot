@@ -350,3 +350,72 @@ def test_void_columns_migrate_idempotently_with_null_backfill(tmp_path, monkeypa
         assert "idx_sales_voided_at" in indexes
     finally:
         conn.close()
+
+
+def test_audit_log_table_created_on_upgrade_and_idempotent(tmp_path, monkeypatch):
+    """audit_log is a brand-new table for an existing (pre-audit-log) install;
+    init_db() must create it via the SCHEMA script without touching any
+    pre-existing data, and be safely re-runnable."""
+    db_path = tmp_path / "pre_audit_log.db"
+    _build_pre_void_db(str(db_path))
+    monkeypatch.setenv("LOTSPOT_DB", str(db_path))
+
+    import db
+
+    db.init_db()
+    db.init_db()  # re-running must not raise or duplicate anything
+
+    conn = db.connect()
+    try:
+        tables = {
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        assert "audit_log" in tables
+
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(audit_log)")}
+        assert {
+            "id",
+            "actor",
+            "action",
+            "entity_type",
+            "entity_id",
+            "store_id",
+            "created_at",
+            "created_at_utc",
+        } <= columns
+
+        # pre-existing row from the pre-audit-log schema must survive untouched
+        sale = conn.execute("SELECT * FROM sales WHERE sku = 'PRE-VOID-1'").fetchone()
+        assert sale is not None
+        assert sale["total_cents"] == 300
+
+        assert conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_record_audit_writes_local_and_utc_timestamps(tmp_path, monkeypatch):
+    db_path = tmp_path / "audit.db"
+    monkeypatch.setenv("LOTSPOT_DB", str(db_path))
+    monkeypatch.setenv("LOTSPOT_STORE_ID", "store-99")
+
+    import db
+
+    db.init_db()
+    conn = db.connect()
+    try:
+        db.record_audit(conn, "admin", "product.create", "product", 42)
+        conn.commit()
+        row = conn.execute("SELECT * FROM audit_log").fetchone()
+        assert row["actor"] == "admin"
+        assert row["action"] == "product.create"
+        assert row["entity_type"] == "product"
+        assert row["entity_id"] == "42"
+        assert row["store_id"] == "store-99"
+        assert row["created_at"]
+        assert row["created_at_utc"]
+    finally:
+        conn.close()
