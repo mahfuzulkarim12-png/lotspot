@@ -22,7 +22,7 @@ from starlette.staticfiles import StaticFiles
 
 import db
 import tax
-from auth import TokenStore, hash_password, seed_admin, verify_password
+from auth import LoginRateLimiter, TokenStore, hash_password, seed_admin, verify_password
 from events import Broadcaster
 from models import (
     CheckoutItemIn,
@@ -470,6 +470,7 @@ def create_app() -> FastAPI:
         ),
     )
     app.state.tokens = TokenStore()
+    app.state.login_limiter = LoginRateLimiter()
     app.state.broadcaster = Broadcaster()
     app.state.pos_api_key = os.environ.get("LOTSPOT_POS_API_KEY")
 
@@ -504,7 +505,24 @@ def create_app() -> FastAPI:
     # --------------------------------------------------------------- auth
 
     @app.post("/api/auth/login", tags=["auth"])
-    async def login(body: LoginIn):
+    async def login(body: LoginIn, request: Request):
+        # Rate limiting is per PCI DSS v4 Req 8.3.4. request.client.host is
+        # the direct TCP peer; behind the deploy-path nginx proxy this would
+        # need `uvicorn --proxy-headers` to see the real client, not a
+        # hand-parsed X-Forwarded-For (spoofable by the client otherwise).
+        client_ip = request.client.host if request.client else "unknown"
+        username_key = f"user:{body.username}"
+        ip_key = f"ip:{client_ip}"
+        limiter = app.state.login_limiter
+        if limiter.is_locked(username_key) or limiter.is_locked(ip_key):
+            conn = db.connect()
+            try:
+                db.record_audit(conn, body.username, "auth.login_locked", "auth", body.username)
+                conn.commit()
+            finally:
+                conn.close()
+            raise ApiError(429, "Too many failed login attempts. Try again later.")
+
         conn = db.connect()
         try:
             row = conn.execute(
@@ -522,7 +540,11 @@ def create_app() -> FastAPI:
         finally:
             conn.close()
         if not valid:
+            limiter.record_failure(username_key)
+            limiter.record_failure(ip_key)
             raise ApiError(401, "Invalid username or password")
+        limiter.record_success(username_key)
+        limiter.record_success(ip_key)
         session = app.state.tokens.create(body.username)
         return ok({"username": body.username, **session})
 

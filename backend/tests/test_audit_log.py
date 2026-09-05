@@ -214,6 +214,26 @@ def test_void_receipt_writes_exactly_one_audit_row_for_multi_item_receipt(
     assert rows[0]["entity_id"] == transaction_id
 
 
+def test_locked_out_login_attempt_writes_audit_row(client):
+    from auth import LOGIN_MAX_ATTEMPTS
+    from tests.conftest import TEST_ADMIN_PASSWORD, TEST_ADMIN_USER
+
+    for _ in range(LOGIN_MAX_ATTEMPTS):
+        client.post(
+            "/api/auth/login",
+            json={"username": TEST_ADMIN_USER, "password": "wrong-password"},
+        )
+
+    resp = client.post(
+        "/api/auth/login",
+        json={"username": TEST_ADMIN_USER, "password": TEST_ADMIN_PASSWORD},
+    )
+    assert resp.status_code == 429
+    rows = _audit_rows("auth.login_locked")
+    assert len(rows) == 1
+    assert rows[0]["actor"] == TEST_ADMIN_USER
+
+
 def test_audit_log_never_updated_or_deleted_from_app_code():
     pattern = re.compile(r"(?i)\b(UPDATE|DELETE\s+FROM)\s+audit_log\b")
     for filename in ("app.py", "db.py"):

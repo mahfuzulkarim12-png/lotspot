@@ -11,11 +11,19 @@ import os
 import secrets
 import sqlite3
 from datetime import datetime, timedelta
+from typing import Callable
 
 logger = logging.getLogger("lotspot.auth")
 
 PBKDF2_ITERATIONS = 600_000
 TOKEN_TTL_HOURS = 12
+SESSION_IDLE_TIMEOUT_MINUTES = 15
+
+# PCI DSS v4 Req 8.3.4: lock out after no more than 10 invalid attempts, for
+# at least 30 minutes or until an admin resets it. We do not offer an admin
+# reset path yet, so the lockout simply expires after the window.
+LOGIN_MAX_ATTEMPTS = 10
+LOGIN_LOCKOUT_MINUTES = 30
 
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PASSWORD = "admin"
@@ -67,6 +75,45 @@ class TokenStore:
 
     def revoke(self, token: str) -> None:
         self._tokens.pop(token, None)
+
+
+class LoginRateLimiter:
+    """Per-key failed-login throttling (PCI DSS v4 Req 8.3.4).
+
+    Keys are caller-defined strings (e.g. "user:<username>" or "ip:<addr>")
+    so the same limiter instance can enforce independent per-username and
+    per-IP lockouts. A key locks out after `max_attempts` consecutive
+    failures and stays locked for `lockout`; any success clears its state.
+    """
+
+    def __init__(
+        self,
+        max_attempts: int = LOGIN_MAX_ATTEMPTS,
+        lockout: timedelta = timedelta(minutes=LOGIN_LOCKOUT_MINUTES),
+        now: Callable[[], datetime] = datetime.now,
+    ):
+        self._max_attempts = max_attempts
+        self._lockout = lockout
+        self._now = now
+        self._state: dict[str, dict] = {}
+
+    def is_locked(self, key: str) -> bool:
+        entry = self._state.get(key)
+        if entry is None or entry["locked_until"] is None:
+            return False
+        if entry["locked_until"] <= self._now():
+            del self._state[key]
+            return False
+        return True
+
+    def record_failure(self, key: str) -> None:
+        entry = self._state.setdefault(key, {"failures": 0, "locked_until": None})
+        entry["failures"] += 1
+        if entry["failures"] >= self._max_attempts:
+            entry["locked_until"] = self._now() + self._lockout
+
+    def record_success(self, key: str) -> None:
+        self._state.pop(key, None)
 
 
 def seed_admin(conn: sqlite3.Connection, now_iso: str) -> None:

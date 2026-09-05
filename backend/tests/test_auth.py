@@ -53,3 +53,68 @@ def test_logout_invalidates_token(client, admin_headers):
 
     resp = client.get("/api/auth/me", headers=admin_headers)
     assert resp.status_code == 401
+
+
+def _fail_login(client, username=TEST_ADMIN_USER, password="wrong-password"):
+    return client.post(
+        "/api/auth/login", json={"username": username, "password": password}
+    )
+
+
+def test_login_locks_out_after_repeated_failures(client):
+    from auth import LOGIN_MAX_ATTEMPTS
+
+    for _ in range(LOGIN_MAX_ATTEMPTS - 1):
+        resp = _fail_login(client)
+        assert resp.status_code == 401
+
+    resp = _fail_login(client)
+    assert resp.status_code == 401
+
+    # Locked out now, even with the correct password.
+    resp = client.post(
+        "/api/auth/login",
+        json={"username": TEST_ADMIN_USER, "password": TEST_ADMIN_PASSWORD},
+    )
+    assert resp.status_code == 429
+
+
+def test_login_lockout_is_per_ip_across_usernames(client):
+    """TestClient always presents the same client IP, so hammering distinct
+    usernames from one client proves the per-IP half of the throttle."""
+    from auth import LOGIN_MAX_ATTEMPTS
+
+    for i in range(LOGIN_MAX_ATTEMPTS):
+        resp = _fail_login(client, username=f"ghost-{i}")
+        assert resp.status_code == 401
+
+    resp = client.post(
+        "/api/auth/login",
+        json={"username": TEST_ADMIN_USER, "password": TEST_ADMIN_PASSWORD},
+    )
+    assert resp.status_code == 429
+
+
+def test_login_success_resets_the_failure_count(client):
+    from auth import LOGIN_MAX_ATTEMPTS
+
+    for _ in range(LOGIN_MAX_ATTEMPTS - 1):
+        resp = _fail_login(client)
+        assert resp.status_code == 401
+
+    resp = client.post(
+        "/api/auth/login",
+        json={"username": TEST_ADMIN_USER, "password": TEST_ADMIN_PASSWORD},
+    )
+    assert resp.status_code == 200
+
+    # Fresh window: one failure short of the max must not lock the account out.
+    for _ in range(LOGIN_MAX_ATTEMPTS - 1):
+        resp = _fail_login(client)
+        assert resp.status_code == 401
+
+    resp = client.post(
+        "/api/auth/login",
+        json={"username": TEST_ADMIN_USER, "password": TEST_ADMIN_PASSWORD},
+    )
+    assert resp.status_code == 200
