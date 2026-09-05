@@ -50,27 +50,53 @@ def verify_password(password: str, stored: str) -> bool:
         return False
 
 
-class TokenStore:
-    """In-memory bearer tokens with expiry."""
+# TODO(security): admin login has no second factor. PCI DSS v4 Req 8.4.2
+# will require MFA for all access into the CDE once a card-acceptance tier
+# is chosen; that choice gates whether MFA needs new hardware (a PIN pad,
+# a TOTP app) or can reuse something already in the stack. Revisit once the
+# LotSpot constitution documents that tier decision.
 
-    def __init__(self, ttl: timedelta = timedelta(hours=TOKEN_TTL_HOURS)):
+
+class TokenStore:
+    """In-memory bearer tokens with a 12h absolute TTL and a 15-minute idle
+    timeout (PCI DSS v4 Req 8.2.8): a token dies at whichever comes first."""
+
+    def __init__(
+        self,
+        ttl: timedelta = timedelta(hours=TOKEN_TTL_HOURS),
+        idle_timeout: timedelta = timedelta(minutes=SESSION_IDLE_TIMEOUT_MINUTES),
+        now: Callable[[], datetime] = datetime.now,
+    ):
         self._tokens: dict[str, dict] = {}
         self._ttl = ttl
+        self._idle_timeout = idle_timeout
+        self._now = now
 
     def create(self, username: str) -> dict:
         token = secrets.token_urlsafe(32)
-        expires_at = datetime.now() + self._ttl
-        self._tokens[token] = {"username": username, "expires_at": expires_at}
+        created_at = self._now()
+        expires_at = created_at + self._ttl
+        self._tokens[token] = {
+            "username": username,
+            "expires_at": expires_at,
+            "last_active": created_at,
+        }
         return {"token": token, "expires_at": expires_at.isoformat()}
 
     def validate(self, token: str) -> str | None:
-        """Return the username for a live token, or None."""
+        """Return the username for a live token, or None. A successful
+        validate counts as activity and refreshes the idle window."""
         entry = self._tokens.get(token)
         if entry is None:
             return None
-        if entry["expires_at"] < datetime.now():
+        now = self._now()
+        if entry["expires_at"] < now:
             del self._tokens[token]
             return None
+        if entry["last_active"] + self._idle_timeout < now:
+            del self._tokens[token]
+            return None
+        entry["last_active"] = now
         return entry["username"]
 
     def revoke(self, token: str) -> None:

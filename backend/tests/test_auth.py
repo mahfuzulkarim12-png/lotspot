@@ -1,4 +1,58 @@
+from datetime import datetime, timedelta
+
+from auth import TokenStore
 from tests.conftest import TEST_ADMIN_PASSWORD, TEST_ADMIN_USER
+
+
+class FakeClock:
+    def __init__(self, start: datetime | None = None):
+        self.now = start or datetime(2026, 1, 1, 12, 0, 0)
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def advance(self, **kwargs) -> None:
+        self.now += timedelta(**kwargs)
+
+
+def test_token_store_expires_after_idle_timeout():
+    clock = FakeClock()
+    store = TokenStore(idle_timeout=timedelta(minutes=15), now=clock)
+    session = store.create("admin")
+
+    clock.advance(minutes=16)
+    assert store.validate(session["token"]) is None
+
+
+def test_token_store_activity_refreshes_idle_window():
+    clock = FakeClock()
+    store = TokenStore(idle_timeout=timedelta(minutes=15), now=clock)
+    session = store.create("admin")
+
+    clock.advance(minutes=10)
+    assert store.validate(session["token"]) == "admin"
+
+    # A second window measured from the refreshed activity, not from create().
+    clock.advance(minutes=10)
+    assert store.validate(session["token"]) == "admin"
+
+
+def test_token_store_absolute_ttl_still_applies_despite_activity():
+    clock = FakeClock()
+    store = TokenStore(
+        ttl=timedelta(minutes=30), idle_timeout=timedelta(minutes=15), now=clock
+    )
+    session = store.create("admin")
+
+    clock.advance(minutes=10)
+    assert store.validate(session["token"]) == "admin"
+    clock.advance(minutes=10)
+    assert store.validate(session["token"]) == "admin"
+
+    # 35 minutes since creation exceeds the 30-minute absolute TTL, even
+    # though the 15-minute idle gap alone would not have expired it.
+    clock.advance(minutes=15)
+    assert store.validate(session["token"]) is None
 
 
 def test_login_returns_token(client):
